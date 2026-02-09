@@ -1,267 +1,176 @@
-diff --git a/packages/opencode-gitbutler/src/auto-update.ts b/packages/opencode-gitbutler/src/auto-update.ts
-index 575b6b9..aabf73c 100644
---- a/packages/opencode-gitbutler/src/auto-update.ts
-+++ b/packages/opencode-gitbutler/src/auto-update.ts
-@@ -76,18 +76,17 @@ function compareVersions(a: string, b: string): number {
- export async function checkForUpdate(
-   currentVersion: string
- ): Promise<UpdateInfo | null> {
--  try {
--    const controller = new AbortController();
--    const timer = setTimeout(
--      () => controller.abort(),
--      FETCH_TIMEOUT_MS
--    );
-+  const controller = new AbortController();
-+  const timer = setTimeout(
-+    () => controller.abort(),
-+    FETCH_TIMEOUT_MS
-+  );
+diff --git a/src/config.ts b/src/config.ts
+index e8cdf0e..d8de9d9 100644
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -62,16 +62,15 @@ export function stripJsonComments(input: string): string {
+       continue;
+     }
  
-+  try {
-     const response = await fetch(NPM_DIST_TAGS_URL, {
-       signal: controller.signal,
-       headers: { Accept: "application/json" },
-     });
--    clearTimeout(timer);
+-    if (ch === "/" && input[i + 1] === "/") {
++    if (ch === "/" && i + 1 < len && input[i + 1] === "/") {
+       i += 2;
+       while (i < len && input[i] !== "\n") i++;
+       continue;
+     }
  
-     if (!response.ok) return null;
+-    if (ch === "/" && input[i + 1] === "*") {
+-      i += 2;
+-      while (i < len && !(input[i] === "*" && input[i + 1] === "/")) i++;
+-      i += 2;
++    if (ch === "/" && i + 1 < len && input[i + 1] === "*") {
++      const closeIdx = input.indexOf("*/", i + 2);
++      i = closeIdx !== -1 ? closeIdx + 2 : len;
+       continue;
+     }
  
-@@ -102,6 +101,8 @@ export async function checkForUpdate(
-     };
-   } catch {
-     return null;
-+  } finally {
-+    clearTimeout(timer);
-   }
- }
+diff --git a/src/plugin.ts b/src/plugin.ts
+index c53d0fa..bb553ab 100644
+--- a/src/plugin.ts
++++ b/src/plugin.ts
+@@ -646,41 +646,48 @@ export function createGitButlerPlugin(
+         const commit = branch.commits[0];
+         if (!commit) continue;
  
-@@ -139,14 +140,18 @@ export function createAutoUpdateHook(
-   let pendingMessage: string | null = null;
-   let checkPromise: Promise<void> | null = null;
- 
--  checkPromise = checkForUpdate(config.currentVersion).then(
--    (info) => {
-+  checkPromise = checkForUpdate(config.currentVersion)
-+    .then((info) => {
-       if (info?.updateAvailable) {
-         pendingMessage = formatUpdateMessage(info);
-       }
-+    })
-+    .catch(() => {
-+      // Silently ignore — update check is best-effort
-+    })
-+    .finally(() => {
-       checkPromise = null;
--    }
--  );
-+    });
- 
-   return {
-     onSessionCreated: async () => {
-diff --git a/packages/opencode-gitbutler/src/config.ts b/packages/opencode-gitbutler/src/config.ts
-index 0854ada..e8cdf0e 100644
---- a/packages/opencode-gitbutler/src/config.ts
-+++ b/packages/opencode-gitbutler/src/config.ts
-@@ -84,6 +84,16 @@ export function stripJsonComments(input: string): string {
-   return result;
- }
- 
-+function isValidRegex(pattern: unknown): pattern is string {
-+  if (typeof pattern !== "string") return false;
-+  try {
-+    new RegExp(pattern);
-+    return true;
-+  } catch {
-+    return false;
-+  }
-+}
-+
- export async function loadConfig(
-   cwd: string
- ): Promise<GitButlerPluginConfig> {
-@@ -109,19 +119,19 @@ export async function loadConfig(
-       commit_message_provider: typeof parsed.commit_message_provider === "string"
-         ? parsed.commit_message_provider
-         : DEFAULT_CONFIG.commit_message_provider,
--      llm_timeout_ms: typeof parsed.llm_timeout_ms === "number"
-+      llm_timeout_ms: typeof parsed.llm_timeout_ms === "number" && parsed.llm_timeout_ms > 0
-         ? parsed.llm_timeout_ms
-         : DEFAULT_CONFIG.llm_timeout_ms,
--      max_diff_chars: typeof parsed.max_diff_chars === "number"
-+      max_diff_chars: typeof parsed.max_diff_chars === "number" && parsed.max_diff_chars > 0
-         ? parsed.max_diff_chars
-         : DEFAULT_CONFIG.max_diff_chars,
--      branch_slug_max_length: typeof parsed.branch_slug_max_length === "number"
-+      branch_slug_max_length: typeof parsed.branch_slug_max_length === "number" && parsed.branch_slug_max_length > 0
-         ? parsed.branch_slug_max_length
-         : DEFAULT_CONFIG.branch_slug_max_length,
-       auto_update: typeof parsed.auto_update === "boolean"
-         ? parsed.auto_update
-         : DEFAULT_CONFIG.auto_update,
--      default_branch_pattern: typeof parsed.default_branch_pattern === "string"
-+      default_branch_pattern: isValidRegex(parsed.default_branch_pattern)
-         ? parsed.default_branch_pattern
-         : DEFAULT_CONFIG.default_branch_pattern,
-     };
-diff --git a/packages/opencode-gitbutler/src/plugin.ts b/packages/opencode-gitbutler/src/plugin.ts
-index 0d4b6b8..c53d0fa 100644
---- a/packages/opencode-gitbutler/src/plugin.ts
-+++ b/packages/opencode-gitbutler/src/plugin.ts
-@@ -149,15 +149,19 @@ export function createGitButlerPlugin(
-   }
- 
-   function isWorkspaceMode(): boolean {
--    const proc = Bun.spawnSync(
--      ["git", "symbolic-ref", "--short", "HEAD"],
--      { cwd, stdout: "pipe", stderr: "pipe" }
--    );
--    if (proc.exitCode !== 0) return false;
--    return (
--      proc.stdout.toString().trim() ===
--      "gitbutler/workspace"
--    );
-+    try {
-+      const proc = Bun.spawnSync(
-+        ["git", "symbolic-ref", "--short", "HEAD"],
-+        { cwd, stdout: "pipe", stderr: "pipe" }
-+      );
-+      if (proc.exitCode !== 0) return false;
-+      return (
-+        proc.stdout.toString().trim() ===
-+        "gitbutler/workspace"
-+      );
-+    } catch {
-+      return false;
-+    }
-   }
- 
-   const parentSessionByTaskSession = await loadSessionMap();
-@@ -204,13 +208,12 @@ export function createGitButlerPlugin(
-     message: string
-   ): void {
-     const rootID = resolveSessionRoot(sessionID);
--    if (!pendingNotifications.has(rootID)) {
--      pendingNotifications.set(rootID, []);
--    }
--    pendingNotifications.get(rootID)!.push({
-+    const existing = pendingNotifications.get(rootID) ?? [];
-+    existing.push({
-       message,
-       timestamp: Date.now(),
-     });
-+    pendingNotifications.set(rootID, existing);
-     debugLog(cwd, "notification-queued", {
-       rootID,
-       message,
-@@ -272,13 +275,13 @@ export function createGitButlerPlugin(
-   function findFileBranch(
-     filePath: string
-   ): FileBranchResult {
--    const proc = Bun.spawnSync(
--      ["but", "status", "--json", "-f"],
--      { cwd, stdout: "pipe", stderr: "pipe" }
--    );
--    if (proc.exitCode !== 0) return { inBranch: false };
+-        const llmMessage = await generateLLMCommitMessage(
+-          commit.commitId,
+-          prompt
+-        );
+-        const commitMsg =
+-          llmMessage ?? toCommitMessage(prompt);
+-        butReword(commit.cliId, commitMsg);
+-        rewordedBranches.add(branch.cliId);
+-        savePluginState(
+-          conversationsWithEdits,
+-          rewordedBranches
+-        ).catch(() => {});
 -
-     try {
-+      const proc = Bun.spawnSync(
-+        ["but", "status", "--json", "-f"],
-+        { cwd, stdout: "pipe", stderr: "pipe" }
-+      );
-+      if (proc.exitCode !== 0) return { inBranch: false };
+-        addNotification(
+-          sessionID,
+-          `Commit on branch \`${branch.name}\` reworded to: "${commitMsg}"`
+-        );
+-
+-        debugLog(cwd, "reword", {
+-          branch: branch.name,
+-          commit: commit.cliId,
+-          message: commitMsg,
+-          source: llmMessage ? "llm" : "deterministic",
+-          multi: branch.commits.length > 1,
+-        }).catch(() => {});
++        try {
++          const llmMessage = await generateLLMCommitMessage(
++            commit.commitId,
++            prompt
++          );
++          const commitMsg =
++            llmMessage ?? toCommitMessage(prompt);
++          butReword(commit.cliId, commitMsg);
++          rewordedBranches.add(branch.cliId);
++          savePluginState(
++            conversationsWithEdits,
++            rewordedBranches
++          ).catch(() => {});
+ 
+-        if (DEFAULT_BRANCH_PATTERN.test(branch.name)) {
+-          latestBranchName = toBranchSlug(prompt);
+-          butReword(branch.cliId, latestBranchName);
+           addNotification(
+             sessionID,
+-            `Branch renamed from \`${branch.name}\` to \`${latestBranchName}\``
++            `Commit on branch \`${branch.name}\` reworded to: "${commitMsg}"`
+           );
+-        } else {
+-          latestBranchName = branch.name;
 +
-       const data = JSON.parse(
-         proc.stdout.toString()
-       ) as ButStatusJson;
-@@ -323,19 +326,27 @@ export function createGitButlerPlugin(
-   }
++          debugLog(cwd, "reword", {
++            branch: branch.name,
++            commit: commit.cliId,
++            message: commitMsg,
++            source: llmMessage ? "llm" : "deterministic",
++            multi: branch.commits.length > 1,
++          }).catch(() => {});
++
++          if (DEFAULT_BRANCH_PATTERN.test(branch.name)) {
++            latestBranchName = toBranchSlug(prompt);
++            butReword(branch.cliId, latestBranchName);
++            addNotification(
++              sessionID,
++              `Branch renamed from \`${branch.name}\` to \`${latestBranchName}\``
++            );
++          } else {
++            latestBranchName = branch.name;
++          }
++        } catch (err) {
++          debugLog(cwd, "reword-error", {
++            branch: branch.name,
++            error: err instanceof Error ? err.message : String(err),
++          }).catch(() => {});
+         }
+       }
+     }
+@@ -774,7 +781,7 @@ export function createGitButlerPlugin(
+         ["but", "cursor", subcommand],
+         {
+           cwd,
+-          stdout: "pipe",
++          stdout: "ignore",
+           stderr: "pipe",
+           stdin: new Blob([json]),
+         }
+@@ -1104,14 +1111,21 @@ export function createGitButlerPlugin(
+           conversationId,
+         }).catch(() => {});
  
-   function butRub(source: string, dest: string): boolean {
--    const proc = Bun.spawnSync(
--      ["but", "rub", source, dest],
--      { cwd, stdout: "pipe", stderr: "pipe" }
--    );
--    return proc.exitCode === 0;
-+    try {
-+      const proc = Bun.spawnSync(
-+        ["but", "rub", source, dest],
-+        { cwd, stdout: "pipe", stderr: "pipe" }
-+      );
-+      return proc.exitCode === 0;
-+    } catch {
-+      return false;
-+    }
-   }
+-        await butCursor("after-edit", {
+-          conversation_id: conversationId,
+-          generation_id: crypto.randomUUID(),
+-          file_path: relativePath,
+-          edits: extractEdits(output),
+-          hook_event_name: "afterFileEdit",
+-          workspace_roots: [cwd],
+-        });
++        try {
++          await butCursor("after-edit", {
++            conversation_id: conversationId,
++            generation_id: crypto.randomUUID(),
++            file_path: relativePath,
++            edits: extractEdits(output),
++            hook_event_name: "afterFileEdit",
++            workspace_roots: [cwd],
++          });
++        } catch (err) {
++          debugLog(cwd, "cursor-after-edit-error", {
++            file: relativePath,
++            error: err instanceof Error ? err.message : String(err),
++          }).catch(() => {});
++        }
  
-   function butUnapply(branchCliId: string): boolean {
--    const proc = Bun.spawnSync(
--      ["but", "unapply", branchCliId],
--      { cwd, stdout: "pipe", stderr: "pipe" }
--    );
--    return proc.exitCode === 0;
-+    try {
-+      const proc = Bun.spawnSync(
-+        ["but", "unapply", branchCliId],
-+        { cwd, stdout: "pipe", stderr: "pipe" }
-+      );
-+      return proc.exitCode === 0;
-+    } catch {
-+      return false;
-+    }
-   }
+         conversationsWithEdits.add(conversationId);
+         savePluginState(
+@@ -1185,13 +1199,20 @@ export function createGitButlerPlugin(
+           conversationId,
+         }).catch(() => {});
  
-   function toRelativePath(absPath: string): string {
-@@ -364,7 +375,12 @@ export function createGitButlerPlugin(
-     }>;
-   };
+-        await butCursor("stop", {
+-          conversation_id: conversationId,
+-          generation_id: crypto.randomUUID(),
+-          status: "completed",
+-          hook_event_name: "stop",
+-          workspace_roots: [cwd],
+-        });
++        try {
++          await butCursor("stop", {
++            conversation_id: conversationId,
++            generation_id: crypto.randomUUID(),
++            status: "completed",
++            hook_event_name: "stop",
++            workspace_roots: [cwd],
++          });
++        } catch (err) {
++          debugLog(cwd, "cursor-stop-error", {
++            conversationId,
++            error: err instanceof Error ? err.message : String(err),
++          }).catch(() => {});
++        }
  
--  const DEFAULT_BRANCH_PATTERN = new RegExp(config.default_branch_pattern);
-+  let DEFAULT_BRANCH_PATTERN: RegExp;
-+  try {
-+    DEFAULT_BRANCH_PATTERN = new RegExp(config.default_branch_pattern);
-+  } catch {
-+    DEFAULT_BRANCH_PATTERN = new RegExp(DEFAULT_CONFIG.default_branch_pattern);
-+  }
- 
-   async function fetchUserPrompt(
-     sessionID: string
-@@ -577,12 +593,12 @@ export function createGitButlerPlugin(
-   }
- 
-   function getFullStatus(): ButStatusFull | null {
--    const proc = Bun.spawnSync(
--      ["but", "status", "--json", "-f"],
--      { cwd, stdout: "pipe", stderr: "pipe" }
--    );
--    if (proc.exitCode !== 0) return null;
-     try {
-+      const proc = Bun.spawnSync(
-+        ["but", "status", "--json", "-f"],
-+        { cwd, stdout: "pipe", stderr: "pipe" }
-+      );
-+      if (proc.exitCode !== 0) return null;
-       return JSON.parse(
-         proc.stdout.toString()
-       ) as ButStatusFull;
-@@ -595,11 +611,15 @@ export function createGitButlerPlugin(
-     target: string,
-     message: string
-   ): boolean {
--    const proc = Bun.spawnSync(
--      ["but", "reword", target, "-m", message],
--      { cwd, stdout: "pipe", stderr: "pipe" }
--    );
--    return proc.exitCode === 0;
-+    try {
-+      const proc = Bun.spawnSync(
-+        ["but", "reword", target, "-m", message],
-+        { cwd, stdout: "pipe", stderr: "pipe" }
-+      );
-+      return proc.exitCode === 0;
-+    } catch {
-+      return false;
-+    }
-   }
- 
-   async function postStopProcessing(
+         await postStopProcessing(props?.sessionID);
+       } finally {
