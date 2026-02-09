@@ -77,6 +77,28 @@ Create `.opencode/gitbutler.json` in your workspace root to override defaults:
 
 All fields are optional. Missing fields use defaults.
 
+## Feature Parity vs Native Integrations
+
+How this plugin compares to GitButler's built-in Cursor and Claude Code integrations:
+
+| Feature | Cursor | Claude Code | This Plugin | Status |
+|---------|--------|-------------|-------------|--------|
+| Post-edit hook | `after-edit` | PostToolUse | `tool.execute.after` | Equal |
+| Stop/idle hook | `stop` | Stop | `session.idle` | Equal |
+| Branch creation | `get_or_create_session` | `get_or_create_session` | via `conversation_id` | Equal |
+| Auto-assign to existing branch | — | — | `but rub` via `findFileBranch()` | **Better** |
+| Branch auto-rename (LLM) | From Cursor DB | From transcript | `but reword` + user prompt | Equal |
+| Auto-commit on stop | `handle_changes()` | `handle_changes()` | via `but cursor stop` | Equal |
+| Commit message (LLM) | OpenAI gpt-4-mini | OpenAI gpt-4-mini | Claude Haiku via OpenCode SDK | Equal |
+| Multi-agent session mapping | — | — | `resolveSessionRoot()` | **Unique** |
+| File locking (concurrent) | — | 60s wait + retry | 60s poll + stale cleanup | Equal |
+| Agent state notifications | — | — | `chat.messages.transform` | **Unique** |
+| Hunk-level rub guard | — | — | Skip multi-stack files | **Better** |
+
+**Score**: 7 Equal, 4 Better/Unique
+
+For the full architecture breakdown, gap analysis, and known issues, see [`docs/gitbutler-integration.md`](docs/gitbutler-integration.md).
+
 ## Troubleshooting
 
 ### GitButler CLI not found

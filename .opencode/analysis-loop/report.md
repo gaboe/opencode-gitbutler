@@ -4,8 +4,9 @@
 
 - **Start (run 1)**: 2026-02-09T08:43:28Z — **End**: 2026-02-09T08:52:00Z (8m 32s)
 - **Start (run 2)**: 2026-02-09T10:36:36Z — **End**: 2026-02-09T10:44:00Z (~7m 24s)
+- **Start (run 3)**: 2026-02-09T11:36:36Z — **End**: 2026-02-09T11:50:00Z (~13m 24s)
 - **Exit reason**: converged (2 consecutive zero-patch iterations)
-- **Total iterations**: 6 (4 productive + 2 convergence across both runs)
+- **Total iterations**: 8 (6 productive + 2 convergence across 3 runs)
 - **Data sources available**:
   - Plugin debug log: NO (debug.log not found — skipping log analysis)
   - Session history: NO (search-opencode-history.ts unavailable — skipping session history)
@@ -16,10 +17,10 @@
 
 ## Executive Summary
 
-- **Total patches proposed**: 10
-- **Total patches applied**: 10
-- **Total patches rejected**: 0
-- **Files modified**: `src/config.ts`, `src/plugin.ts`, `src/auto-update.ts`
+- **Total patches proposed**: 15
+- **Total patches applied**: 14
+- **Total patches rejected**: 2 (1 overlap, 1 false positive)
+- **Files modified**: `src/config.ts`, `src/plugin.ts`, `src/auto-update.ts`, `src/index.ts`
 - **Key findings (run 1 — iterations 1-2)**:
   - Invalid regex in user config could crash plugin at initialization (HIGH)
   - Timer leak in auto-update + unhandled promise rejection (HIGH)
@@ -117,14 +118,56 @@
 
 ---
 
-### Iteration 5 (Run 2)
+### Iteration 5 (Run 3)
 
-**Timestamp**: 2026-02-09T10:44:00Z
+**Timestamp**: 2026-02-09T11:36:00Z
 
 **Analysis**:
-- Sources consulted: full re-evaluation of all remaining issues
-- Issues found: 7 remaining — all architectural or too invasive
-- Assessment: No safe, scoped patches remaining
+- Sources consulted: git log, Oracle consultation, 2 parallel explore agents (error handling gaps + logic bugs), direct AST-grep + grep searches
+- Issues found: 6 actionable, 3 selected for patching, 1 rejected (overlap)
+- Top issues:
+  - `butReword()` return value ignored — success assumed even on failure: HIGH, plugin.ts:715
+  - `saveSessionMap()` unguarded `await` can crash hook handlers: HIGH, plugin.ts:933,965
+  - `loadCommands` for-loop body has no try/catch — one bad command file kills init: MEDIUM, index.ts:89-116
+  - Lock timeout steal (REJECTED — overlaps ±5 lines with iteration 3): MEDIUM, plugin.ts:1086-1098
+
+**Patches**: Proposed: 4 | Applied: 3 | Rejected: 1 (overlap with iteration 3 at plugin.ts:1107)
+
+**Changes**:
+- `src/plugin.ts:715-760`: Check `butReword()` return value before recording success — on failure, log warning and `continue` to next branch instead of polluting `rewordedBranches` set and emitting false-success notifications
+- `src/plugin.ts:948-959,985-997`: Wrap both `saveSessionMap()` call sites (subagent mapping + session.created) in try/catch with `log.warn` — prevents file I/O errors from breaking hook execution
+- `src/index.ts:90-120`: Wrap `loadCommands` for-loop body in try/catch — one unreadable command .md file no longer aborts plugin initialization
+
+**Rejections**:
+- `src/plugin.ts:1086-1098`: Lock timeout abort fix — overlaps ±5 lines with iteration 3 patch at src/plugin.ts:1107
+
+---
+
+### Iteration 6 (Run 3)
+
+**Timestamp**: 2026-02-09T11:36:00Z
+
+**Analysis**:
+- Sources consulted: remaining candidates from Oracle + explore agent findings, overlap zone recalculation
+- Issues found: 2 candidates, 1 patchable, 1 false positive
+- Top issue:
+  - `hasMultiBranchHunks` counts stacks instead of branches — semantic bug causes false positives in multi-branch detection: MEDIUM, plugin.ts:1036-1048
+
+**Patches**: Proposed: 2 | Applied: 1 | Rejected: 1 (false positive)
+
+**Changes**:
+- `src/plugin.ts:1036-1048`: Fix `hasMultiBranchHunks` to iterate through `branch.commits` instead of `stack.assignedChanges` — correctly detects multi-branch file ownership
+
+**Rejections**:
+- `src/index.ts:55-60`: parseFrontmatter colon-in-value — REJECTED as false positive (indexOf + slice already preserves all subsequent colons)
+
+---
+
+### Iteration 7 (Run 3)
+
+**Timestamp**: 2026-02-09T11:48:00Z
+
+**Analysis**: Full sweep of remaining issues — all are architectural (lock redesign), by-design (fire-and-forget catches), or in overlap zones.
 
 **Patches**: Proposed: 0 | Applied: 0 | Rejected: 0
 
@@ -132,11 +175,11 @@ consecutive_zero_patch_count = 1
 
 ---
 
-### Iteration 6 (Run 2)
+### Iteration 8 (Run 3)
 
-**Timestamp**: 2026-02-09T10:44:00Z
+**Timestamp**: 2026-02-09T11:49:00Z
 
-**Analysis**: Same assessment — no new findings, no patchable issues.
+**Analysis**: Same assessment — no new patchable issues.
 
 **Patches**: Proposed: 0 | Applied: 0 | Rejected: 0
 
@@ -158,6 +201,12 @@ consecutive_zero_patch_count = 2 → **Convergence stop condition met**
 | 3 | src/plugin.ts | 1107-1125, 1195-1211 | applied | try/catch on butCursor calls in hook handlers |
 | 3 | src/config.ts | 65-76 | applied | stripJsonComments block comment bounds fix (indexOf) |
 | 4 | src/plugin.ts | 649-690 | applied | try/catch per-branch in postStopProcessing loop |
+| 5 | src/plugin.ts | 715-760 | applied | Check butReword() return value before recording success |
+| 5 | src/plugin.ts | 948-959, 985-997 | applied | Wrap saveSessionMap() in try/catch with log.warn |
+| 5 | src/index.ts | 90-120 | applied | try/catch in loadCommands for-loop body |
+| 5 | src/plugin.ts | 1086-1098 | rejected | Overlaps ±5 lines with iteration 3 at plugin.ts:1107 |
+| 6 | src/plugin.ts | 1036-1048 | applied | Fix hasMultiBranchHunks to count branches not stacks |
+| 6 | src/index.ts | 55-60 | rejected | False positive — colon handling already correct |
 
 ---
 
@@ -165,12 +214,11 @@ consecutive_zero_patch_count = 2 → **Convergence stop condition met**
 
 Issues identified but not addressed (for manual review):
 
-- **TOCTOU race in file lock mechanism** (plugin.ts ~984-1025): HIGH — Lock acquisition has check-then-set gap across async yields. Requires mutex or atomic CAS redesign. Mitigated by JavaScript's single-threaded sync execution, but vulnerable between `await` points.
-- **Race in parentSessionByTaskSession concurrent writes** (plugin.ts ~857-889): HIGH — Two hooks can write to shared map and call `saveSessionMap()` concurrently. Requires write queue or debounced persistence.
-- **7 unsafe `as Type` casts on untrusted JSON** (plugin.ts:102,131,285,602,920; config.ts:110; auto-update.ts:93): MEDIUM — External data (file reads, CLI stdout, API responses) cast without runtime validation. Requires structural validation helpers (e.g., Zod) or manual type guards.
+- **TOCTOU race in file lock mechanism** (plugin.ts ~1086-1098): HIGH — Lock acquisition has check-then-set gap across async yields. Could not be patched (overlaps iteration 3 zone). Requires mutex or atomic CAS redesign. Mitigated by JavaScript's single-threaded sync execution, but vulnerable between `await` points.
+- **Race in parentSessionByTaskSession concurrent writes** (plugin.ts ~929-970): HIGH — Two hooks can write to shared map and call `saveSessionMap()` concurrently. Write failures are now caught (iteration 5), but concurrent writes can still lose data. Requires write queue or debounced persistence.
+- **7 unsafe `as Type` casts on untrusted JSON** (plugin.ts, config.ts, auto-update.ts): MEDIUM — External data (file reads, CLI stdout, API responses) cast without runtime validation. Requires structural validation helpers (e.g., Zod) or manual type guards.
 - **index.ts:9 pkg.version no validation** (index.ts:9-10): MEDIUM — `pkg.version` accessed without null check. Bundled file so low practical risk.
-- **index.ts loadCommands missing try/catch** (index.ts:86-119): MEDIUM — File read could throw on permissions. Low risk for bundled command files.
-- **toBranchSlug silently strips Unicode** (plugin.ts:407-416): MEDIUM — Design choice. Non-ASCII characters produce generic "opencode-session" branch name.
+- **toBranchSlug silently strips Unicode** (plugin.ts:443-452): MEDIUM — Design choice. Non-ASCII characters produce generic "opencode-session" branch name.
 - **Duplicate guard uses globalThis string key** (index.ts:121-128): LOW — Module reload prevention. Low risk in practice.
 
 ---
@@ -180,18 +228,26 @@ Issues identified but not addressed (for manual review):
 **Loop exit**: converged
 
 **Verification**:
-- Build (`tsc --noEmit`): PASS
+- Build (`bun run build`): PASS
 - Tests (`bun test`): 22 pass, 0 fail
 - Public API exports: All 5 unchanged (GitButlerPlugin, DEFAULT_CONFIG, loadConfig, stripJsonComments, GitButlerPluginConfig)
+- LSP diagnostics: 0 errors across all modified files
 - No git commits created
 - All patches are local-only
 
-**Diff stats**: 2 files changed, 72 insertions(+), 52 deletions(-)
+**Diff stats (cumulative)**: 2 files changed, 81 insertions(+), 40 deletions(-)
+
+**Recommendations for next run**:
+- The file lock mechanism (TOCTOU race) needs architectural redesign — cannot be patched incrementally due to overlap constraints
+- Consider adding Zod or manual type guards for JSON parsed from external sources (CLI stdout, file reads)
+- `parentSessionByTaskSession` concurrent write race needs a write queue/debounce
 
 **Checkpoint files created**:
 - `.opencode/analysis-loop/checkpoint-1.patch`
 - `.opencode/analysis-loop/checkpoint-2.patch`
 - `.opencode/analysis-loop/checkpoint-3.patch`
+- `.opencode/analysis-loop/checkpoint-5.patch`
+- `.opencode/analysis-loop/checkpoint-6.patch`
 
 **Final state**:
 - All patches are local-only (not committed)

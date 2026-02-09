@@ -58,6 +58,7 @@ function parseFrontmatter(content: string): {
     const key = trimmed.slice(0, separatorIndex).trim();
     const rawValue = trimmed.slice(separatorIndex + 1).trim();
     if (!key) continue;
+    if (!key) continue;
 
     const isQuoted =
       (rawValue.startsWith('"') && rawValue.endsWith('"')) ||
@@ -87,32 +88,37 @@ async function loadCommands(): Promise<Record<string, CommandDefinition>> {
   const commands: Record<string, CommandDefinition> = {};
 
   for (const commandName of COMMAND_FILES) {
-    const commandPath = new URL(`../command/${commandName}.md`, import.meta.url);
-    const file = Bun.file(commandPath);
-    if (!(await file.exists())) {
+    try {
+      const commandPath = new URL(`../command/${commandName}.md`, import.meta.url);
+      const file = Bun.file(commandPath);
+      if (!(await file.exists())) {
+        continue;
+      }
+
+      const source = await file.text();
+      const { fields, template } = parseFrontmatter(source);
+      const command: CommandDefinition = {
+        template,
+      };
+
+      if (typeof fields.description === "string") {
+        command.description = fields.description;
+      }
+      if (typeof fields.agent === "string") {
+        command.agent = fields.agent;
+      }
+      if (typeof fields.model === "string") {
+        command.model = fields.model;
+      }
+      if (typeof fields.subtask === "boolean") {
+        command.subtask = fields.subtask;
+      }
+
+      commands[commandName] = command;
+    } catch {
+      // Skip unreadable command files — don't break plugin init
       continue;
     }
-
-    const source = await file.text();
-    const { fields, template } = parseFrontmatter(source);
-    const command: CommandDefinition = {
-      template,
-    };
-
-    if (typeof fields.description === "string") {
-      command.description = fields.description;
-    }
-    if (typeof fields.agent === "string") {
-      command.agent = fields.agent;
-    }
-    if (typeof fields.model === "string") {
-      command.model = fields.model;
-    }
-    if (typeof fields.subtask === "boolean") {
-      command.subtask = fields.subtask;
-    }
-
-    commands[commandName] = command;
   }
 
   return commands;

@@ -1,176 +1,181 @@
-diff --git a/src/config.ts b/src/config.ts
-index e8cdf0e..d8de9d9 100644
---- a/src/config.ts
-+++ b/src/config.ts
-@@ -62,16 +62,15 @@ export function stripJsonComments(input: string): string {
-       continue;
-     }
+diff --git a/src/index.ts b/src/index.ts
+index 13ec3cb..ff71157 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -58,6 +58,7 @@ function parseFrontmatter(content: string): {
+     const key = trimmed.slice(0, separatorIndex).trim();
+     const rawValue = trimmed.slice(separatorIndex + 1).trim();
+     if (!key) continue;
++    if (!key) continue;
  
--    if (ch === "/" && input[i + 1] === "/") {
-+    if (ch === "/" && i + 1 < len && input[i + 1] === "/") {
-       i += 2;
-       while (i < len && input[i] !== "\n") i++;
-       continue;
-     }
+     const isQuoted =
+       (rawValue.startsWith('"') && rawValue.endsWith('"')) ||
+@@ -87,32 +88,37 @@ async function loadCommands(): Promise<Record<string, CommandDefinition>> {
+   const commands: Record<string, CommandDefinition> = {};
  
--    if (ch === "/" && input[i + 1] === "*") {
--      i += 2;
--      while (i < len && !(input[i] === "*" && input[i + 1] === "/")) i++;
--      i += 2;
-+    if (ch === "/" && i + 1 < len && input[i + 1] === "*") {
-+      const closeIdx = input.indexOf("*/", i + 2);
-+      i = closeIdx !== -1 ? closeIdx + 2 : len;
-       continue;
-     }
+   for (const commandName of COMMAND_FILES) {
+-    const commandPath = new URL(`../command/${commandName}.md`, import.meta.url);
+-    const file = Bun.file(commandPath);
+-    if (!(await file.exists())) {
+-      continue;
+-    }
++    try {
++      const commandPath = new URL(`../command/${commandName}.md`, import.meta.url);
++      const file = Bun.file(commandPath);
++      if (!(await file.exists())) {
++        continue;
++      }
  
+-    const source = await file.text();
+-    const { fields, template } = parseFrontmatter(source);
+-    const command: CommandDefinition = {
+-      template,
+-    };
++      const source = await file.text();
++      const { fields, template } = parseFrontmatter(source);
++      const command: CommandDefinition = {
++        template,
++      };
+ 
+-    if (typeof fields.description === "string") {
+-      command.description = fields.description;
+-    }
+-    if (typeof fields.agent === "string") {
+-      command.agent = fields.agent;
+-    }
+-    if (typeof fields.model === "string") {
+-      command.model = fields.model;
+-    }
+-    if (typeof fields.subtask === "boolean") {
+-      command.subtask = fields.subtask;
+-    }
++      if (typeof fields.description === "string") {
++        command.description = fields.description;
++      }
++      if (typeof fields.agent === "string") {
++        command.agent = fields.agent;
++      }
++      if (typeof fields.model === "string") {
++        command.model = fields.model;
++      }
++      if (typeof fields.subtask === "boolean") {
++        command.subtask = fields.subtask;
++      }
+ 
+-    commands[commandName] = command;
++      commands[commandName] = command;
++    } catch {
++      // Skip unreadable command files — don't break plugin init
++      continue;
++    }
+   }
+ 
+   return commands;
 diff --git a/src/plugin.ts b/src/plugin.ts
-index c53d0fa..bb553ab 100644
+index ab5f1ca..d84bb8a 100644
 --- a/src/plugin.ts
 +++ b/src/plugin.ts
-@@ -646,41 +646,48 @@ export function createGitButlerPlugin(
-         const commit = branch.commits[0];
-         if (!commit) continue;
- 
--        const llmMessage = await generateLLMCommitMessage(
--          commit.commitId,
--          prompt
--        );
--        const commitMsg =
--          llmMessage ?? toCommitMessage(prompt);
--        butReword(commit.cliId, commitMsg);
--        rewordedBranches.add(branch.cliId);
--        savePluginState(
--          conversationsWithEdits,
--          rewordedBranches
--        ).catch(() => {});
--
--        addNotification(
--          sessionID,
--          `Commit on branch \`${branch.name}\` reworded to: "${commitMsg}"`
--        );
--
--        debugLog(cwd, "reword", {
--          branch: branch.name,
--          commit: commit.cliId,
--          message: commitMsg,
--          source: llmMessage ? "llm" : "deterministic",
--          multi: branch.commits.length > 1,
--        }).catch(() => {});
-+        try {
-+          const llmMessage = await generateLLMCommitMessage(
-+            commit.commitId,
-+            prompt
-+          );
-+          const commitMsg =
-+            llmMessage ?? toCommitMessage(prompt);
-+          butReword(commit.cliId, commitMsg);
-+          rewordedBranches.add(branch.cliId);
-+          savePluginState(
-+            conversationsWithEdits,
-+            rewordedBranches
-+          ).catch(() => {});
- 
--        if (DEFAULT_BRANCH_PATTERN.test(branch.name)) {
--          latestBranchName = toBranchSlug(prompt);
--          butReword(branch.cliId, latestBranchName);
-           addNotification(
-             sessionID,
--            `Branch renamed from \`${branch.name}\` to \`${latestBranchName}\``
-+            `Commit on branch \`${branch.name}\` reworded to: "${commitMsg}"`
+@@ -712,7 +712,15 @@ export function createGitButlerPlugin(
            );
--        } else {
--          latestBranchName = branch.name;
-+
-+          debugLog(cwd, "reword", {
-+            branch: branch.name,
-+            commit: commit.cliId,
-+            message: commitMsg,
-+            source: llmMessage ? "llm" : "deterministic",
-+            multi: branch.commits.length > 1,
-+          }).catch(() => {});
-+
-+          if (DEFAULT_BRANCH_PATTERN.test(branch.name)) {
-+            latestBranchName = toBranchSlug(prompt);
-+            butReword(branch.cliId, latestBranchName);
-+            addNotification(
-+              sessionID,
-+              `Branch renamed from \`${branch.name}\` to \`${latestBranchName}\``
-+            );
-+          } else {
-+            latestBranchName = branch.name;
+           const commitMsg =
+             llmMessage ?? toCommitMessage(prompt);
+-          butReword(commit.cliId, commitMsg);
++          const rewordOk = butReword(commit.cliId, commitMsg);
++          if (!rewordOk) {
++            log.warn("reword-failed", {
++              branch: branch.name,
++              commit: commit.cliId,
++              message: commitMsg,
++            });
++            continue;
 +          }
-+        } catch (err) {
-+          debugLog(cwd, "reword-error", {
-+            branch: branch.name,
-+            error: err instanceof Error ? err.message : String(err),
-+          }).catch(() => {});
-         }
+           rewordedBranches.add(branch.cliId);
+           savePluginState(
+             conversationsWithEdits,
+@@ -734,15 +742,23 @@ export function createGitButlerPlugin(
+ 
+           if (DEFAULT_BRANCH_PATTERN.test(branch.name)) {
+             latestBranchName = toBranchSlug(prompt);
+-            butReword(branch.cliId, latestBranchName);
+-            log.info("branch-rename", {
+-              from: branch.name,
+-              to: latestBranchName,
+-            });
+-            addNotification(
+-              sessionID,
+-              `Branch renamed from \`${branch.name}\` to \`${latestBranchName}\``
+-            );
++            const renameOk = butReword(branch.cliId, latestBranchName);
++            if (renameOk) {
++              log.info("branch-rename", {
++                from: branch.name,
++                to: latestBranchName,
++              });
++              addNotification(
++                sessionID,
++                `Branch renamed from \`${branch.name}\` to \`${latestBranchName}\``
++              );
++            } else {
++              log.warn("branch-rename-failed", {
++                from: branch.name,
++                to: latestBranchName,
++              });
++              latestBranchName = branch.name;
++            }
+           } else {
+             latestBranchName = branch.name;
+           }
+@@ -930,7 +946,15 @@ export function createGitButlerPlugin(
+       taskSessionID,
+       parentSessionID
+     );
+-    await saveSessionMap(parentSessionByTaskSession);
++    try {
++      await saveSessionMap(parentSessionByTaskSession);
++    } catch (err) {
++      log.warn("session-map-save-failed", {
++        task: taskSessionID,
++        parent: parentSessionID,
++        error: err instanceof Error ? err.message : String(err),
++      });
++    }
+     log.info("session-map-subagent", {
+       task: taskSessionID,
+       parent: parentSessionID,
+@@ -962,7 +986,15 @@ export function createGitButlerPlugin(
+       sessionID,
+       parentSessionID
+     );
+-    await saveSessionMap(parentSessionByTaskSession);
++    try {
++      await saveSessionMap(parentSessionByTaskSession);
++    } catch (err) {
++      log.warn("session-map-save-failed", {
++        session: sessionID,
++        parent: parentSessionID,
++        error: err instanceof Error ? err.message : String(err),
++      });
++    }
+     log.info("session-map-created", {
+       session: sessionID,
+       parent: parentSessionID,
+@@ -1003,11 +1035,14 @@ export function createGitButlerPlugin(
+ 
+       let branchCount = 0;
+       for (const stack of data.stacks ?? []) {
+-        const hasInAssigned = stack.assignedChanges?.some(
+-          (ch) => ch.filePath === filePath
+-        );
+-        if (hasInAssigned) branchCount++;
+-        if (branchCount > 1) return true;
++        for (const branch of stack.branches ?? []) {
++          const hasInBranch = branch.commits?.some(
++            (c: { changes?: ButStatusChange[] }) =>
++              c.changes?.some((ch) => ch.filePath === filePath)
++          );
++          if (hasInBranch) branchCount++;
++          if (branchCount > 1) return true;
++        }
        }
-     }
-@@ -774,7 +781,7 @@ export function createGitButlerPlugin(
-         ["but", "cursor", subcommand],
-         {
-           cwd,
--          stdout: "pipe",
-+          stdout: "ignore",
-           stderr: "pipe",
-           stdin: new Blob([json]),
-         }
-@@ -1104,14 +1111,21 @@ export function createGitButlerPlugin(
-           conversationId,
-         }).catch(() => {});
  
--        await butCursor("after-edit", {
--          conversation_id: conversationId,
--          generation_id: crypto.randomUUID(),
--          file_path: relativePath,
--          edits: extractEdits(output),
--          hook_event_name: "afterFileEdit",
--          workspace_roots: [cwd],
--        });
-+        try {
-+          await butCursor("after-edit", {
-+            conversation_id: conversationId,
-+            generation_id: crypto.randomUUID(),
-+            file_path: relativePath,
-+            edits: extractEdits(output),
-+            hook_event_name: "afterFileEdit",
-+            workspace_roots: [cwd],
-+          });
-+        } catch (err) {
-+          debugLog(cwd, "cursor-after-edit-error", {
-+            file: relativePath,
-+            error: err instanceof Error ? err.message : String(err),
-+          }).catch(() => {});
-+        }
- 
-         conversationsWithEdits.add(conversationId);
-         savePluginState(
-@@ -1185,13 +1199,20 @@ export function createGitButlerPlugin(
-           conversationId,
-         }).catch(() => {});
- 
--        await butCursor("stop", {
--          conversation_id: conversationId,
--          generation_id: crypto.randomUUID(),
--          status: "completed",
--          hook_event_name: "stop",
--          workspace_roots: [cwd],
--        });
-+        try {
-+          await butCursor("stop", {
-+            conversation_id: conversationId,
-+            generation_id: crypto.randomUUID(),
-+            status: "completed",
-+            hook_event_name: "stop",
-+            workspace_roots: [cwd],
-+          });
-+        } catch (err) {
-+          debugLog(cwd, "cursor-stop-error", {
-+            conversationId,
-+            error: err instanceof Error ? err.message : String(err),
-+          }).catch(() => {});
-+        }
- 
-         await postStopProcessing(props?.sessionID);
-       } finally {
+       return false;

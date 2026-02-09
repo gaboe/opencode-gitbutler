@@ -712,7 +712,15 @@ export function createGitButlerPlugin(
           );
           const commitMsg =
             llmMessage ?? toCommitMessage(prompt);
-          butReword(commit.cliId, commitMsg);
+          const rewordOk = butReword(commit.cliId, commitMsg);
+          if (!rewordOk) {
+            log.warn("reword-failed", {
+              branch: branch.name,
+              commit: commit.cliId,
+              message: commitMsg,
+            });
+            continue;
+          }
           rewordedBranches.add(branch.cliId);
           savePluginState(
             conversationsWithEdits,
@@ -734,15 +742,23 @@ export function createGitButlerPlugin(
 
           if (DEFAULT_BRANCH_PATTERN.test(branch.name)) {
             latestBranchName = toBranchSlug(prompt);
-            butReword(branch.cliId, latestBranchName);
-            log.info("branch-rename", {
-              from: branch.name,
-              to: latestBranchName,
-            });
-            addNotification(
-              sessionID,
-              `Branch renamed from \`${branch.name}\` to \`${latestBranchName}\``
-            );
+            const renameOk = butReword(branch.cliId, latestBranchName);
+            if (renameOk) {
+              log.info("branch-rename", {
+                from: branch.name,
+                to: latestBranchName,
+              });
+              addNotification(
+                sessionID,
+                `Branch renamed from \`${branch.name}\` to \`${latestBranchName}\``
+              );
+            } else {
+              log.warn("branch-rename-failed", {
+                from: branch.name,
+                to: latestBranchName,
+              });
+              latestBranchName = branch.name;
+            }
           } else {
             latestBranchName = branch.name;
           }
@@ -930,7 +946,15 @@ export function createGitButlerPlugin(
       taskSessionID,
       parentSessionID
     );
-    await saveSessionMap(parentSessionByTaskSession);
+    try {
+      await saveSessionMap(parentSessionByTaskSession);
+    } catch (err) {
+      log.warn("session-map-save-failed", {
+        task: taskSessionID,
+        parent: parentSessionID,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     log.info("session-map-subagent", {
       task: taskSessionID,
       parent: parentSessionID,
@@ -962,7 +986,15 @@ export function createGitButlerPlugin(
       sessionID,
       parentSessionID
     );
-    await saveSessionMap(parentSessionByTaskSession);
+    try {
+      await saveSessionMap(parentSessionByTaskSession);
+    } catch (err) {
+      log.warn("session-map-save-failed", {
+        session: sessionID,
+        parent: parentSessionID,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     log.info("session-map-created", {
       session: sessionID,
       parent: parentSessionID,
@@ -1003,11 +1035,14 @@ export function createGitButlerPlugin(
 
       let branchCount = 0;
       for (const stack of data.stacks ?? []) {
-        const hasInAssigned = stack.assignedChanges?.some(
-          (ch) => ch.filePath === filePath
-        );
-        if (hasInAssigned) branchCount++;
-        if (branchCount > 1) return true;
+        for (const branch of stack.branches ?? []) {
+          const hasInBranch = branch.commits?.some(
+            (c: { changes?: ButStatusChange[] }) =>
+              c.changes?.some((ch) => ch.filePath === filePath)
+          );
+          if (hasInBranch) branchCount++;
+          if (branchCount > 1) return true;
+        }
       }
 
       return false;

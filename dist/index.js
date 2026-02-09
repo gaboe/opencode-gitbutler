@@ -506,7 +506,15 @@ function createGitButlerPlugin(config = { ...DEFAULT_CONFIG }) {
           try {
             const llmMessage = await generateLLMCommitMessage(commit.commitId, prompt);
             const commitMsg = llmMessage ?? toCommitMessage(prompt);
-            butReword(commit.cliId, commitMsg);
+            const rewordOk = butReword(commit.cliId, commitMsg);
+            if (!rewordOk) {
+              log.warn("reword-failed", {
+                branch: branch.name,
+                commit: commit.cliId,
+                message: commitMsg
+              });
+              continue;
+            }
             rewordedBranches.add(branch.cliId);
             savePluginState(conversationsWithEdits, rewordedBranches).catch(() => {});
             addNotification(sessionID, `Commit on branch \`${branch.name}\` reworded to: "${commitMsg}"`);
@@ -519,12 +527,20 @@ function createGitButlerPlugin(config = { ...DEFAULT_CONFIG }) {
             });
             if (DEFAULT_BRANCH_PATTERN.test(branch.name)) {
               latestBranchName = toBranchSlug(prompt);
-              butReword(branch.cliId, latestBranchName);
-              log.info("branch-rename", {
-                from: branch.name,
-                to: latestBranchName
-              });
-              addNotification(sessionID, `Branch renamed from \`${branch.name}\` to \`${latestBranchName}\``);
+              const renameOk = butReword(branch.cliId, latestBranchName);
+              if (renameOk) {
+                log.info("branch-rename", {
+                  from: branch.name,
+                  to: latestBranchName
+                });
+                addNotification(sessionID, `Branch renamed from \`${branch.name}\` to \`${latestBranchName}\``);
+              } else {
+                log.warn("branch-rename-failed", {
+                  from: branch.name,
+                  to: latestBranchName
+                });
+                latestBranchName = branch.name;
+              }
             } else {
               latestBranchName = branch.name;
             }
@@ -641,7 +657,15 @@ function createGitButlerPlugin(config = { ...DEFAULT_CONFIG }) {
       if (!parentSessionID || !taskSessionID)
         return;
       parentSessionByTaskSession.set(taskSessionID, parentSessionID);
-      await saveSessionMap(parentSessionByTaskSession);
+      try {
+        await saveSessionMap(parentSessionByTaskSession);
+      } catch (err) {
+        log.warn("session-map-save-failed", {
+          task: taskSessionID,
+          parent: parentSessionID,
+          error: err instanceof Error ? err.message : String(err)
+        });
+      }
       log.info("session-map-subagent", {
         task: taskSessionID,
         parent: parentSessionID
@@ -658,7 +682,15 @@ function createGitButlerPlugin(config = { ...DEFAULT_CONFIG }) {
       if (!sessionID || !parentSessionID)
         return;
       parentSessionByTaskSession.set(sessionID, parentSessionID);
-      await saveSessionMap(parentSessionByTaskSession);
+      try {
+        await saveSessionMap(parentSessionByTaskSession);
+      } catch (err) {
+        log.warn("session-map-save-failed", {
+          session: sessionID,
+          parent: parentSessionID,
+          error: err instanceof Error ? err.message : String(err)
+        });
+      }
       log.info("session-map-created", {
         session: sessionID,
         parent: parentSessionID
@@ -687,11 +719,13 @@ function createGitButlerPlugin(config = { ...DEFAULT_CONFIG }) {
         const data = JSON.parse(proc.stdout.toString());
         let branchCount = 0;
         for (const stack of data.stacks ?? []) {
-          const hasInAssigned = stack.assignedChanges?.some((ch) => ch.filePath === filePath);
-          if (hasInAssigned)
-            branchCount++;
-          if (branchCount > 1)
-            return true;
+          for (const branch of stack.branches ?? []) {
+            const hasInBranch = branch.commits?.some((c) => c.changes?.some((ch) => ch.filePath === filePath));
+            if (hasInBranch)
+              branchCount++;
+            if (branchCount > 1)
+              return true;
+          }
         }
         return false;
       } catch {
@@ -1054,6 +1088,8 @@ function parseFrontmatter(content) {
     const rawValue = trimmed.slice(separatorIndex + 1).trim();
     if (!key)
       continue;
+    if (!key)
+      continue;
     const isQuoted = rawValue.startsWith('"') && rawValue.endsWith('"') || rawValue.startsWith("'") && rawValue.endsWith("'");
     let parsedValue;
     if (isQuoted) {
@@ -1076,29 +1112,33 @@ function parseFrontmatter(content) {
 async function loadCommands() {
   const commands = {};
   for (const commandName of COMMAND_FILES) {
-    const commandPath = new URL(`../command/${commandName}.md`, import.meta.url);
-    const file = Bun.file(commandPath);
-    if (!await file.exists()) {
+    try {
+      const commandPath = new URL(`../command/${commandName}.md`, import.meta.url);
+      const file = Bun.file(commandPath);
+      if (!await file.exists()) {
+        continue;
+      }
+      const source = await file.text();
+      const { fields, template } = parseFrontmatter(source);
+      const command = {
+        template
+      };
+      if (typeof fields.description === "string") {
+        command.description = fields.description;
+      }
+      if (typeof fields.agent === "string") {
+        command.agent = fields.agent;
+      }
+      if (typeof fields.model === "string") {
+        command.model = fields.model;
+      }
+      if (typeof fields.subtask === "boolean") {
+        command.subtask = fields.subtask;
+      }
+      commands[commandName] = command;
+    } catch {
       continue;
     }
-    const source = await file.text();
-    const { fields, template } = parseFrontmatter(source);
-    const command = {
-      template
-    };
-    if (typeof fields.description === "string") {
-      command.description = fields.description;
-    }
-    if (typeof fields.agent === "string") {
-      command.agent = fields.agent;
-    }
-    if (typeof fields.model === "string") {
-      command.model = fields.model;
-    }
-    if (typeof fields.subtask === "boolean") {
-      command.subtask = fields.subtask;
-    }
-    commands[commandName] = command;
   }
   return commands;
 }
