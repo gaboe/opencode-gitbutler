@@ -1,0 +1,17 @@
+# Runtime Artifact Policy for Analysis Loop
+# This directory contains ephemeral analysis artifacts and checkpoints.
+# Only tracked files (report.md, report-template.md) are committed.
+
+# Checkpoint patches - one per iteration, used for recovery
+checkpoint-*.patch
+
+# Patch ledger - tracks all patches applied across iterations
+patch-ledger.json
+
+# Iteration logs and temporary analysis outputs
+*.log
+*.tmp
+
+# Keep tracked files (do not ignore):
+# - report.md (final analysis report)
+# - report-template.md (template for report generation)
