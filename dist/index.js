@@ -59,6 +59,16 @@ function stripJsonComments(input) {
   result = result.replace(/,\s*([\]}])/g, "$1");
   return result;
 }
+function isValidRegex(pattern) {
+  if (typeof pattern !== "string")
+    return false;
+  try {
+    new RegExp(pattern);
+    return true;
+  } catch {
+    return false;
+  }
+}
 async function loadConfig(cwd) {
   const configPath = resolve(cwd, CONFIG_FILE_NAME);
   try {
@@ -73,11 +83,11 @@ async function loadConfig(cwd) {
       log_enabled: typeof parsed.log_enabled === "boolean" ? parsed.log_enabled : DEFAULT_CONFIG.log_enabled,
       commit_message_model: typeof parsed.commit_message_model === "string" ? parsed.commit_message_model : DEFAULT_CONFIG.commit_message_model,
       commit_message_provider: typeof parsed.commit_message_provider === "string" ? parsed.commit_message_provider : DEFAULT_CONFIG.commit_message_provider,
-      llm_timeout_ms: typeof parsed.llm_timeout_ms === "number" ? parsed.llm_timeout_ms : DEFAULT_CONFIG.llm_timeout_ms,
-      max_diff_chars: typeof parsed.max_diff_chars === "number" ? parsed.max_diff_chars : DEFAULT_CONFIG.max_diff_chars,
-      branch_slug_max_length: typeof parsed.branch_slug_max_length === "number" ? parsed.branch_slug_max_length : DEFAULT_CONFIG.branch_slug_max_length,
+      llm_timeout_ms: typeof parsed.llm_timeout_ms === "number" && parsed.llm_timeout_ms > 0 ? parsed.llm_timeout_ms : DEFAULT_CONFIG.llm_timeout_ms,
+      max_diff_chars: typeof parsed.max_diff_chars === "number" && parsed.max_diff_chars > 0 ? parsed.max_diff_chars : DEFAULT_CONFIG.max_diff_chars,
+      branch_slug_max_length: typeof parsed.branch_slug_max_length === "number" && parsed.branch_slug_max_length > 0 ? parsed.branch_slug_max_length : DEFAULT_CONFIG.branch_slug_max_length,
       auto_update: typeof parsed.auto_update === "boolean" ? parsed.auto_update : DEFAULT_CONFIG.auto_update,
-      default_branch_pattern: typeof parsed.default_branch_pattern === "string" ? parsed.default_branch_pattern : DEFAULT_CONFIG.default_branch_pattern
+      default_branch_pattern: isValidRegex(parsed.default_branch_pattern) ? parsed.default_branch_pattern : DEFAULT_CONFIG.default_branch_pattern
     };
   } catch (err) {
     console.warn(`[opencode-gitbutler] Failed to parse config at ${configPath}: ${err instanceof Error ? err.message : String(err)}. Using defaults.`);
@@ -150,10 +160,14 @@ function createGitButlerPlugin(config = { ...DEFAULT_CONFIG }) {
 `);
     }
     function isWorkspaceMode() {
-      const proc = Bun.spawnSync(["git", "symbolic-ref", "--short", "HEAD"], { cwd, stdout: "pipe", stderr: "pipe" });
-      if (proc.exitCode !== 0)
+      try {
+        const proc = Bun.spawnSync(["git", "symbolic-ref", "--short", "HEAD"], { cwd, stdout: "pipe", stderr: "pipe" });
+        if (proc.exitCode !== 0)
+          return false;
+        return proc.stdout.toString().trim() === "gitbutler/workspace";
+      } catch {
         return false;
-      return proc.stdout.toString().trim() === "gitbutler/workspace";
+      }
     }
     const parentSessionByTaskSession = await loadSessionMap();
     const persistedState = await loadPluginState();
@@ -169,13 +183,12 @@ function createGitButlerPlugin(config = { ...DEFAULT_CONFIG }) {
     const pendingNotifications = new Map;
     function addNotification(sessionID, message) {
       const rootID = resolveSessionRoot(sessionID);
-      if (!pendingNotifications.has(rootID)) {
-        pendingNotifications.set(rootID, []);
-      }
-      pendingNotifications.get(rootID).push({
+      const existing = pendingNotifications.get(rootID) ?? [];
+      existing.push({
         message,
         timestamp: Date.now()
       });
+      pendingNotifications.set(rootID, existing);
       debugLog(cwd, "notification-queued", {
         rootID,
         message
@@ -203,10 +216,10 @@ function createGitButlerPlugin(config = { ...DEFAULT_CONFIG }) {
     }
     const resolvedCwd = resolve2(cwd);
     function findFileBranch(filePath) {
-      const proc = Bun.spawnSync(["but", "status", "--json", "-f"], { cwd, stdout: "pipe", stderr: "pipe" });
-      if (proc.exitCode !== 0)
-        return { inBranch: false };
       try {
+        const proc = Bun.spawnSync(["but", "status", "--json", "-f"], { cwd, stdout: "pipe", stderr: "pipe" });
+        if (proc.exitCode !== 0)
+          return { inBranch: false };
         const data = JSON.parse(proc.stdout.toString());
         const normalized = toRelativePath(filePath);
         const unassigned = data.unassignedChanges?.find((ch) => ch.filePath === normalized);
@@ -233,12 +246,20 @@ function createGitButlerPlugin(config = { ...DEFAULT_CONFIG }) {
       }
     }
     function butRub(source, dest) {
-      const proc = Bun.spawnSync(["but", "rub", source, dest], { cwd, stdout: "pipe", stderr: "pipe" });
-      return proc.exitCode === 0;
+      try {
+        const proc = Bun.spawnSync(["but", "rub", source, dest], { cwd, stdout: "pipe", stderr: "pipe" });
+        return proc.exitCode === 0;
+      } catch {
+        return false;
+      }
     }
     function butUnapply(branchCliId) {
-      const proc = Bun.spawnSync(["but", "unapply", branchCliId], { cwd, stdout: "pipe", stderr: "pipe" });
-      return proc.exitCode === 0;
+      try {
+        const proc = Bun.spawnSync(["but", "unapply", branchCliId], { cwd, stdout: "pipe", stderr: "pipe" });
+        return proc.exitCode === 0;
+      } catch {
+        return false;
+      }
     }
     function toRelativePath(absPath) {
       const resolved = resolve2(absPath);
@@ -247,7 +268,12 @@ function createGitButlerPlugin(config = { ...DEFAULT_CONFIG }) {
         return absPath;
       return rel;
     }
-    const DEFAULT_BRANCH_PATTERN = new RegExp(config.default_branch_pattern);
+    let DEFAULT_BRANCH_PATTERN;
+    try {
+      DEFAULT_BRANCH_PATTERN = new RegExp(config.default_branch_pattern);
+    } catch {
+      DEFAULT_BRANCH_PATTERN = new RegExp(DEFAULT_CONFIG.default_branch_pattern);
+    }
     async function fetchUserPrompt(sessionID) {
       try {
         const res = await client.session.messages({
@@ -405,18 +431,22 @@ function createGitButlerPlugin(config = { ...DEFAULT_CONFIG }) {
       }
     }
     function getFullStatus() {
-      const proc = Bun.spawnSync(["but", "status", "--json", "-f"], { cwd, stdout: "pipe", stderr: "pipe" });
-      if (proc.exitCode !== 0)
-        return null;
       try {
+        const proc = Bun.spawnSync(["but", "status", "--json", "-f"], { cwd, stdout: "pipe", stderr: "pipe" });
+        if (proc.exitCode !== 0)
+          return null;
         return JSON.parse(proc.stdout.toString());
       } catch {
         return null;
       }
     }
     function butReword(target, message) {
-      const proc = Bun.spawnSync(["but", "reword", target, "-m", message], { cwd, stdout: "pipe", stderr: "pipe" });
-      return proc.exitCode === 0;
+      try {
+        const proc = Bun.spawnSync(["but", "reword", target, "-m", message], { cwd, stdout: "pipe", stderr: "pipe" });
+        return proc.exitCode === 0;
+      } catch {
+        return false;
+      }
     }
     async function postStopProcessing(sessionID) {
       if (!sessionID)
@@ -852,14 +882,13 @@ function compareVersions(a, b) {
   return 0;
 }
 async function checkForUpdate(currentVersion) {
+  const controller = new AbortController;
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const controller = new AbortController;
-    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     const response = await fetch(NPM_DIST_TAGS_URL, {
       signal: controller.signal,
       headers: { Accept: "application/json" }
     });
-    clearTimeout(timer);
     if (!response.ok)
       return null;
     const data = await response.json();
@@ -873,6 +902,8 @@ async function checkForUpdate(currentVersion) {
     };
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 function formatUpdateMessage(info) {
@@ -889,6 +920,7 @@ function createAutoUpdateHook(config) {
     if (info?.updateAvailable) {
       pendingMessage = formatUpdateMessage(info);
     }
+  }).catch(() => {}).finally(() => {
     checkPromise = null;
   });
   return {

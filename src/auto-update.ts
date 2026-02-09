@@ -76,18 +76,17 @@ function compareVersions(a: string, b: string): number {
 export async function checkForUpdate(
   currentVersion: string
 ): Promise<UpdateInfo | null> {
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(
-      () => controller.abort(),
-      FETCH_TIMEOUT_MS
-    );
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(),
+    FETCH_TIMEOUT_MS
+  );
 
+  try {
     const response = await fetch(NPM_DIST_TAGS_URL, {
       signal: controller.signal,
       headers: { Accept: "application/json" },
     });
-    clearTimeout(timer);
 
     if (!response.ok) return null;
 
@@ -102,6 +101,8 @@ export async function checkForUpdate(
     };
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -139,14 +140,18 @@ export function createAutoUpdateHook(
   let pendingMessage: string | null = null;
   let checkPromise: Promise<void> | null = null;
 
-  checkPromise = checkForUpdate(config.currentVersion).then(
-    (info) => {
+  checkPromise = checkForUpdate(config.currentVersion)
+    .then((info) => {
       if (info?.updateAvailable) {
         pendingMessage = formatUpdateMessage(info);
       }
+    })
+    .catch(() => {
+      // Silently ignore — update check is best-effort
+    })
+    .finally(() => {
       checkPromise = null;
-    }
-  );
+    });
 
   return {
     onSessionCreated: async () => {

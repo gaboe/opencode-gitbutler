@@ -149,15 +149,19 @@ export function createGitButlerPlugin(
   }
 
   function isWorkspaceMode(): boolean {
-    const proc = Bun.spawnSync(
-      ["git", "symbolic-ref", "--short", "HEAD"],
-      { cwd, stdout: "pipe", stderr: "pipe" }
-    );
-    if (proc.exitCode !== 0) return false;
-    return (
-      proc.stdout.toString().trim() ===
-      "gitbutler/workspace"
-    );
+    try {
+      const proc = Bun.spawnSync(
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        { cwd, stdout: "pipe", stderr: "pipe" }
+      );
+      if (proc.exitCode !== 0) return false;
+      return (
+        proc.stdout.toString().trim() ===
+        "gitbutler/workspace"
+      );
+    } catch {
+      return false;
+    }
   }
 
   const parentSessionByTaskSession = await loadSessionMap();
@@ -204,13 +208,12 @@ export function createGitButlerPlugin(
     message: string
   ): void {
     const rootID = resolveSessionRoot(sessionID);
-    if (!pendingNotifications.has(rootID)) {
-      pendingNotifications.set(rootID, []);
-    }
-    pendingNotifications.get(rootID)!.push({
+    const existing = pendingNotifications.get(rootID) ?? [];
+    existing.push({
       message,
       timestamp: Date.now(),
     });
+    pendingNotifications.set(rootID, existing);
     debugLog(cwd, "notification-queued", {
       rootID,
       message,
@@ -272,13 +275,13 @@ export function createGitButlerPlugin(
   function findFileBranch(
     filePath: string
   ): FileBranchResult {
-    const proc = Bun.spawnSync(
-      ["but", "status", "--json", "-f"],
-      { cwd, stdout: "pipe", stderr: "pipe" }
-    );
-    if (proc.exitCode !== 0) return { inBranch: false };
-
     try {
+      const proc = Bun.spawnSync(
+        ["but", "status", "--json", "-f"],
+        { cwd, stdout: "pipe", stderr: "pipe" }
+      );
+      if (proc.exitCode !== 0) return { inBranch: false };
+
       const data = JSON.parse(
         proc.stdout.toString()
       ) as ButStatusJson;
@@ -323,19 +326,27 @@ export function createGitButlerPlugin(
   }
 
   function butRub(source: string, dest: string): boolean {
-    const proc = Bun.spawnSync(
-      ["but", "rub", source, dest],
-      { cwd, stdout: "pipe", stderr: "pipe" }
-    );
-    return proc.exitCode === 0;
+    try {
+      const proc = Bun.spawnSync(
+        ["but", "rub", source, dest],
+        { cwd, stdout: "pipe", stderr: "pipe" }
+      );
+      return proc.exitCode === 0;
+    } catch {
+      return false;
+    }
   }
 
   function butUnapply(branchCliId: string): boolean {
-    const proc = Bun.spawnSync(
-      ["but", "unapply", branchCliId],
-      { cwd, stdout: "pipe", stderr: "pipe" }
-    );
-    return proc.exitCode === 0;
+    try {
+      const proc = Bun.spawnSync(
+        ["but", "unapply", branchCliId],
+        { cwd, stdout: "pipe", stderr: "pipe" }
+      );
+      return proc.exitCode === 0;
+    } catch {
+      return false;
+    }
   }
 
   function toRelativePath(absPath: string): string {
@@ -364,7 +375,12 @@ export function createGitButlerPlugin(
     }>;
   };
 
-  const DEFAULT_BRANCH_PATTERN = new RegExp(config.default_branch_pattern);
+  let DEFAULT_BRANCH_PATTERN: RegExp;
+  try {
+    DEFAULT_BRANCH_PATTERN = new RegExp(config.default_branch_pattern);
+  } catch {
+    DEFAULT_BRANCH_PATTERN = new RegExp(DEFAULT_CONFIG.default_branch_pattern);
+  }
 
   async function fetchUserPrompt(
     sessionID: string
@@ -577,12 +593,12 @@ export function createGitButlerPlugin(
   }
 
   function getFullStatus(): ButStatusFull | null {
-    const proc = Bun.spawnSync(
-      ["but", "status", "--json", "-f"],
-      { cwd, stdout: "pipe", stderr: "pipe" }
-    );
-    if (proc.exitCode !== 0) return null;
     try {
+      const proc = Bun.spawnSync(
+        ["but", "status", "--json", "-f"],
+        { cwd, stdout: "pipe", stderr: "pipe" }
+      );
+      if (proc.exitCode !== 0) return null;
       return JSON.parse(
         proc.stdout.toString()
       ) as ButStatusFull;
@@ -595,11 +611,15 @@ export function createGitButlerPlugin(
     target: string,
     message: string
   ): boolean {
-    const proc = Bun.spawnSync(
-      ["but", "reword", target, "-m", message],
-      { cwd, stdout: "pipe", stderr: "pipe" }
-    );
-    return proc.exitCode === 0;
+    try {
+      const proc = Bun.spawnSync(
+        ["but", "reword", target, "-m", message],
+        { cwd, stdout: "pipe", stderr: "pipe" }
+      );
+      return proc.exitCode === 0;
+    } catch {
+      return false;
+    }
   }
 
   async function postStopProcessing(

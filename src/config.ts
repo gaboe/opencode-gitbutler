@@ -84,6 +84,16 @@ export function stripJsonComments(input: string): string {
   return result;
 }
 
+function isValidRegex(pattern: unknown): pattern is string {
+  if (typeof pattern !== "string") return false;
+  try {
+    new RegExp(pattern);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function loadConfig(
   cwd: string
 ): Promise<GitButlerPluginConfig> {
@@ -109,19 +119,19 @@ export async function loadConfig(
       commit_message_provider: typeof parsed.commit_message_provider === "string"
         ? parsed.commit_message_provider
         : DEFAULT_CONFIG.commit_message_provider,
-      llm_timeout_ms: typeof parsed.llm_timeout_ms === "number"
+      llm_timeout_ms: typeof parsed.llm_timeout_ms === "number" && parsed.llm_timeout_ms > 0
         ? parsed.llm_timeout_ms
         : DEFAULT_CONFIG.llm_timeout_ms,
-      max_diff_chars: typeof parsed.max_diff_chars === "number"
+      max_diff_chars: typeof parsed.max_diff_chars === "number" && parsed.max_diff_chars > 0
         ? parsed.max_diff_chars
         : DEFAULT_CONFIG.max_diff_chars,
-      branch_slug_max_length: typeof parsed.branch_slug_max_length === "number"
+      branch_slug_max_length: typeof parsed.branch_slug_max_length === "number" && parsed.branch_slug_max_length > 0
         ? parsed.branch_slug_max_length
         : DEFAULT_CONFIG.branch_slug_max_length,
       auto_update: typeof parsed.auto_update === "boolean"
         ? parsed.auto_update
         : DEFAULT_CONFIG.auto_update,
-      default_branch_pattern: typeof parsed.default_branch_pattern === "string"
+      default_branch_pattern: isValidRegex(parsed.default_branch_pattern)
         ? parsed.default_branch_pattern
         : DEFAULT_CONFIG.default_branch_pattern,
     };

@@ -1,0 +1,267 @@
+diff --git a/packages/opencode-gitbutler/src/auto-update.ts b/packages/opencode-gitbutler/src/auto-update.ts
+index 575b6b9..aabf73c 100644
+--- a/packages/opencode-gitbutler/src/auto-update.ts
++++ b/packages/opencode-gitbutler/src/auto-update.ts
+@@ -76,18 +76,17 @@ function compareVersions(a: string, b: string): number {
+ export async function checkForUpdate(
+   currentVersion: string
+ ): Promise<UpdateInfo | null> {
+-  try {
+-    const controller = new AbortController();
+-    const timer = setTimeout(
+-      () => controller.abort(),
+-      FETCH_TIMEOUT_MS
+-    );
++  const controller = new AbortController();
++  const timer = setTimeout(
++    () => controller.abort(),
++    FETCH_TIMEOUT_MS
++  );
+ 
++  try {
+     const response = await fetch(NPM_DIST_TAGS_URL, {
+       signal: controller.signal,
+       headers: { Accept: "application/json" },
+     });
+-    clearTimeout(timer);
+ 
+     if (!response.ok) return null;
+ 
+@@ -102,6 +101,8 @@ export async function checkForUpdate(
+     };
+   } catch {
+     return null;
++  } finally {
++    clearTimeout(timer);
+   }
+ }
+ 
+@@ -139,14 +140,18 @@ export function createAutoUpdateHook(
+   let pendingMessage: string | null = null;
+   let checkPromise: Promise<void> | null = null;
+ 
+-  checkPromise = checkForUpdate(config.currentVersion).then(
+-    (info) => {
++  checkPromise = checkForUpdate(config.currentVersion)
++    .then((info) => {
+       if (info?.updateAvailable) {
+         pendingMessage = formatUpdateMessage(info);
+       }
++    })
++    .catch(() => {
++      // Silently ignore — update check is best-effort
++    })
++    .finally(() => {
+       checkPromise = null;
+-    }
+-  );
++    });
+ 
+   return {
+     onSessionCreated: async () => {
+diff --git a/packages/opencode-gitbutler/src/config.ts b/packages/opencode-gitbutler/src/config.ts
+index 0854ada..e8cdf0e 100644
+--- a/packages/opencode-gitbutler/src/config.ts
++++ b/packages/opencode-gitbutler/src/config.ts
+@@ -84,6 +84,16 @@ export function stripJsonComments(input: string): string {
+   return result;
+ }
+ 
++function isValidRegex(pattern: unknown): pattern is string {
++  if (typeof pattern !== "string") return false;
++  try {
++    new RegExp(pattern);
++    return true;
++  } catch {
++    return false;
++  }
++}
++
+ export async function loadConfig(
+   cwd: string
+ ): Promise<GitButlerPluginConfig> {
+@@ -109,19 +119,19 @@ export async function loadConfig(
+       commit_message_provider: typeof parsed.commit_message_provider === "string"
+         ? parsed.commit_message_provider
+         : DEFAULT_CONFIG.commit_message_provider,
+-      llm_timeout_ms: typeof parsed.llm_timeout_ms === "number"
++      llm_timeout_ms: typeof parsed.llm_timeout_ms === "number" && parsed.llm_timeout_ms > 0
+         ? parsed.llm_timeout_ms
+         : DEFAULT_CONFIG.llm_timeout_ms,
+-      max_diff_chars: typeof parsed.max_diff_chars === "number"
++      max_diff_chars: typeof parsed.max_diff_chars === "number" && parsed.max_diff_chars > 0
+         ? parsed.max_diff_chars
+         : DEFAULT_CONFIG.max_diff_chars,
+-      branch_slug_max_length: typeof parsed.branch_slug_max_length === "number"
++      branch_slug_max_length: typeof parsed.branch_slug_max_length === "number" && parsed.branch_slug_max_length > 0
+         ? parsed.branch_slug_max_length
+         : DEFAULT_CONFIG.branch_slug_max_length,
+       auto_update: typeof parsed.auto_update === "boolean"
+         ? parsed.auto_update
+         : DEFAULT_CONFIG.auto_update,
+-      default_branch_pattern: typeof parsed.default_branch_pattern === "string"
++      default_branch_pattern: isValidRegex(parsed.default_branch_pattern)
+         ? parsed.default_branch_pattern
+         : DEFAULT_CONFIG.default_branch_pattern,
+     };
+diff --git a/packages/opencode-gitbutler/src/plugin.ts b/packages/opencode-gitbutler/src/plugin.ts
+index 0d4b6b8..c53d0fa 100644
+--- a/packages/opencode-gitbutler/src/plugin.ts
++++ b/packages/opencode-gitbutler/src/plugin.ts
+@@ -149,15 +149,19 @@ export function createGitButlerPlugin(
+   }
+ 
+   function isWorkspaceMode(): boolean {
+-    const proc = Bun.spawnSync(
+-      ["git", "symbolic-ref", "--short", "HEAD"],
+-      { cwd, stdout: "pipe", stderr: "pipe" }
+-    );
+-    if (proc.exitCode !== 0) return false;
+-    return (
+-      proc.stdout.toString().trim() ===
+-      "gitbutler/workspace"
+-    );
++    try {
++      const proc = Bun.spawnSync(
++        ["git", "symbolic-ref", "--short", "HEAD"],
++        { cwd, stdout: "pipe", stderr: "pipe" }
++      );
++      if (proc.exitCode !== 0) return false;
++      return (
++        proc.stdout.toString().trim() ===
++        "gitbutler/workspace"
++      );
++    } catch {
++      return false;
++    }
+   }
+ 
+   const parentSessionByTaskSession = await loadSessionMap();
+@@ -204,13 +208,12 @@ export function createGitButlerPlugin(
+     message: string
+   ): void {
+     const rootID = resolveSessionRoot(sessionID);
+-    if (!pendingNotifications.has(rootID)) {
+-      pendingNotifications.set(rootID, []);
+-    }
+-    pendingNotifications.get(rootID)!.push({
++    const existing = pendingNotifications.get(rootID) ?? [];
++    existing.push({
+       message,
+       timestamp: Date.now(),
+     });
++    pendingNotifications.set(rootID, existing);
+     debugLog(cwd, "notification-queued", {
+       rootID,
+       message,
+@@ -272,13 +275,13 @@ export function createGitButlerPlugin(
+   function findFileBranch(
+     filePath: string
+   ): FileBranchResult {
+-    const proc = Bun.spawnSync(
+-      ["but", "status", "--json", "-f"],
+-      { cwd, stdout: "pipe", stderr: "pipe" }
+-    );
+-    if (proc.exitCode !== 0) return { inBranch: false };
+-
+     try {
++      const proc = Bun.spawnSync(
++        ["but", "status", "--json", "-f"],
++        { cwd, stdout: "pipe", stderr: "pipe" }
++      );
++      if (proc.exitCode !== 0) return { inBranch: false };
++
+       const data = JSON.parse(
+         proc.stdout.toString()
+       ) as ButStatusJson;
+@@ -323,19 +326,27 @@ export function createGitButlerPlugin(
+   }
+ 
+   function butRub(source: string, dest: string): boolean {
+-    const proc = Bun.spawnSync(
+-      ["but", "rub", source, dest],
+-      { cwd, stdout: "pipe", stderr: "pipe" }
+-    );
+-    return proc.exitCode === 0;
++    try {
++      const proc = Bun.spawnSync(
++        ["but", "rub", source, dest],
++        { cwd, stdout: "pipe", stderr: "pipe" }
++      );
++      return proc.exitCode === 0;
++    } catch {
++      return false;
++    }
+   }
+ 
+   function butUnapply(branchCliId: string): boolean {
+-    const proc = Bun.spawnSync(
+-      ["but", "unapply", branchCliId],
+-      { cwd, stdout: "pipe", stderr: "pipe" }
+-    );
+-    return proc.exitCode === 0;
++    try {
++      const proc = Bun.spawnSync(
++        ["but", "unapply", branchCliId],
++        { cwd, stdout: "pipe", stderr: "pipe" }
++      );
++      return proc.exitCode === 0;
++    } catch {
++      return false;
++    }
+   }
+ 
+   function toRelativePath(absPath: string): string {
+@@ -364,7 +375,12 @@ export function createGitButlerPlugin(
+     }>;
+   };
+ 
+-  const DEFAULT_BRANCH_PATTERN = new RegExp(config.default_branch_pattern);
++  let DEFAULT_BRANCH_PATTERN: RegExp;
++  try {
++    DEFAULT_BRANCH_PATTERN = new RegExp(config.default_branch_pattern);
++  } catch {
++    DEFAULT_BRANCH_PATTERN = new RegExp(DEFAULT_CONFIG.default_branch_pattern);
++  }
+ 
+   async function fetchUserPrompt(
+     sessionID: string
+@@ -577,12 +593,12 @@ export function createGitButlerPlugin(
+   }
+ 
+   function getFullStatus(): ButStatusFull | null {
+-    const proc = Bun.spawnSync(
+-      ["but", "status", "--json", "-f"],
+-      { cwd, stdout: "pipe", stderr: "pipe" }
+-    );
+-    if (proc.exitCode !== 0) return null;
+     try {
++      const proc = Bun.spawnSync(
++        ["but", "status", "--json", "-f"],
++        { cwd, stdout: "pipe", stderr: "pipe" }
++      );
++      if (proc.exitCode !== 0) return null;
+       return JSON.parse(
+         proc.stdout.toString()
+       ) as ButStatusFull;
+@@ -595,11 +611,15 @@ export function createGitButlerPlugin(
+     target: string,
+     message: string
+   ): boolean {
+-    const proc = Bun.spawnSync(
+-      ["but", "reword", target, "-m", message],
+-      { cwd, stdout: "pipe", stderr: "pipe" }
+-    );
+-    return proc.exitCode === 0;
++    try {
++      const proc = Bun.spawnSync(
++        ["but", "reword", target, "-m", message],
++        { cwd, stdout: "pipe", stderr: "pipe" }
++      );
++      return proc.exitCode === 0;
++    } catch {
++      return false;
++    }
+   }
+ 
+   async function postStopProcessing(
