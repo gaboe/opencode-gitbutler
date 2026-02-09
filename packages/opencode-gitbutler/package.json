@@ -13,7 +13,8 @@
   "files": [
     "dist",
     "postinstall.mjs",
-    "SKILL.md"
+    "skill",
+    "command"
   ],
   "dependencies": {
     "@opencode-ai/plugin": "^1.1.0"

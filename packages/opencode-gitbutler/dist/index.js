@@ -909,17 +909,81 @@ function createAutoUpdateHook(config) {
 // src/index.ts
 var DUPLICATE_GUARD_KEY = "__opencode_gitbutler_loaded__";
 var PACKAGE_VERSION = "0.1.0";
-async function loadSkillContent() {
-  try {
-    const skillPath = new URL("../SKILL.md", import.meta.url);
-    const file = Bun.file(skillPath);
-    if (!await file.exists())
-      return null;
-    const content = await file.text();
-    return content.trim() || null;
-  } catch {
-    return null;
+var COMMAND_FILES = ["b-branch", "b-branch-commit", "b-branch-pr"];
+function parseFrontmatter(content) {
+  const lines = content.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") {
+    return { fields: {}, template: content };
   }
+  let frontmatterEnd = -1;
+  for (let i = 1;i < lines.length; i += 1) {
+    if (lines[i]?.trim() === "---") {
+      frontmatterEnd = i;
+      break;
+    }
+  }
+  if (frontmatterEnd === -1) {
+    return { fields: {}, template: content };
+  }
+  const fields = {};
+  for (const line of lines.slice(1, frontmatterEnd)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#"))
+      continue;
+    const separatorIndex = trimmed.indexOf(":");
+    if (separatorIndex === -1)
+      continue;
+    const key = trimmed.slice(0, separatorIndex).trim();
+    const rawValue = trimmed.slice(separatorIndex + 1).trim();
+    if (!key)
+      continue;
+    const isQuoted = rawValue.startsWith('"') && rawValue.endsWith('"') || rawValue.startsWith("'") && rawValue.endsWith("'");
+    let parsedValue;
+    if (isQuoted) {
+      parsedValue = rawValue.slice(1, -1);
+    } else if (rawValue === "true" || rawValue === "false") {
+      parsedValue = rawValue === "true";
+    } else if (/^-?\d+(?:\.\d+)?$/.test(rawValue)) {
+      parsedValue = Number(rawValue);
+    } else {
+      parsedValue = rawValue;
+    }
+    fields[key] = parsedValue;
+  }
+  return {
+    fields,
+    template: lines.slice(frontmatterEnd + 1).join(`
+`)
+  };
+}
+async function loadCommands() {
+  const commands = {};
+  for (const commandName of COMMAND_FILES) {
+    const commandPath = new URL(`../command/${commandName}.md`, import.meta.url);
+    const file = Bun.file(commandPath);
+    if (!await file.exists()) {
+      continue;
+    }
+    const source = await file.text();
+    const { fields, template } = parseFrontmatter(source);
+    const command = {
+      template
+    };
+    if (typeof fields.description === "string") {
+      command.description = fields.description;
+    }
+    if (typeof fields.agent === "string") {
+      command.agent = fields.agent;
+    }
+    if (typeof fields.model === "string") {
+      command.model = fields.model;
+    }
+    if (typeof fields.subtask === "boolean") {
+      command.subtask = fields.subtask;
+    }
+    commands[commandName] = command;
+  }
+  return commands;
 }
 var GitButlerPlugin = async (input) => {
   const g = globalThis;
@@ -935,6 +999,8 @@ var GitButlerPlugin = async (input) => {
     currentVersion: PACKAGE_VERSION,
     auto_update: config.auto_update
   });
+  const skillDir = new URL("../skill", import.meta.url).pathname;
+  const commandDefinitions = await loadCommands();
   const originalEvent = hooks.event;
   hooks.event = async (payload) => {
     if (originalEvent) {
@@ -951,22 +1017,30 @@ var GitButlerPlugin = async (input) => {
       }
     }
   };
-  const skillContent = await loadSkillContent();
-  if (skillContent) {
-    hooks.config = async (config2) => {
-      if (!config2.instructions) {
-        config2.instructions = [];
-      }
-      config2.instructions.push(skillContent);
-    };
-  }
+  const originalConfig = hooks.config;
+  hooks.config = async (config2) => {
+    if (originalConfig) {
+      await originalConfig(config2);
+    }
+    const extendedConfig = config2;
+    if (!extendedConfig.skills)
+      extendedConfig.skills = {};
+    if (!extendedConfig.skills.paths)
+      extendedConfig.skills.paths = [];
+    if (!extendedConfig.skills.paths.includes(skillDir)) {
+      extendedConfig.skills.paths.push(skillDir);
+    }
+    if (!extendedConfig.command) {
+      extendedConfig.command = {};
+    }
+    for (const [name, definition] of Object.entries(commandDefinitions)) {
+      extendedConfig.command[name] = definition;
+    }
+  };
   return hooks;
 };
 var src_default = GitButlerPlugin;
 export {
-  stripJsonComments,
-  loadConfig,
   src_default as default,
-  GitButlerPlugin,
-  DEFAULT_CONFIG
+  GitButlerPlugin
 };
