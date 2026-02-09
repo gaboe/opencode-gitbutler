@@ -6,7 +6,8 @@ import { loadConfig } from "./config.js";
 
 
 const DUPLICATE_GUARD_KEY = "__opencode_gitbutler_loaded__";
-const PACKAGE_VERSION = "0.1.0";
+const pkg = await Bun.file(new URL("../package.json", import.meta.url)).json();
+const PACKAGE_VERSION: string = pkg.version;
 
 type FrontmatterValue = string | number | boolean;
 type CommandDefinition = {

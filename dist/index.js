@@ -940,7 +940,8 @@ function createAutoUpdateHook(config) {
 
 // src/index.ts
 var DUPLICATE_GUARD_KEY = "__opencode_gitbutler_loaded__";
-var PACKAGE_VERSION = "0.1.0";
+var pkg = await Bun.file(new URL("../package.json", import.meta.url)).json();
+var PACKAGE_VERSION = pkg.version;
 var COMMAND_FILES = ["b-branch", "b-branch-commit", "b-branch-pr"];
 function parseFrontmatter(content) {
   const lines = content.split(/\r?\n/);
