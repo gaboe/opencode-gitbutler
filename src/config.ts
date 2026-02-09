@@ -62,16 +62,15 @@ export function stripJsonComments(input: string): string {
       continue;
     }
 
-    if (ch === "/" && input[i + 1] === "/") {
+    if (ch === "/" && i + 1 < len && input[i + 1] === "/") {
       i += 2;
       while (i < len && input[i] !== "\n") i++;
       continue;
     }
 
-    if (ch === "/" && input[i + 1] === "*") {
-      i += 2;
-      while (i < len && !(input[i] === "*" && input[i + 1] === "/")) i++;
-      i += 2;
+    if (ch === "/" && i + 1 < len && input[i + 1] === "*") {
+      const closeIdx = input.indexOf("*/", i + 2);
+      i = closeIdx !== -1 ? closeIdx + 2 : len;
       continue;
     }
 
