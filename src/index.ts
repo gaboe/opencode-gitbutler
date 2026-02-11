@@ -24,7 +24,7 @@ type ExtendedConfig = {
   command?: Record<string, CommandDefinition>;
 };
 
-const COMMAND_FILES = ["b-branch", "b-branch-commit", "b-branch-pr"] as const;
+const COMMAND_FILES = ["b-branch", "b-branch-commit", "b-branch-pr", "b-branch-gc"] as const;
 
 function parseFrontmatter(content: string): {
   fields: Record<string, FrontmatterValue>;

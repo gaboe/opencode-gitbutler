@@ -1,257 +1,107 @@
-# Plugin Analysis Loop Report
+# Plugin DX Analysis Report
 
 ## Metadata
-
-- **Start (run 1)**: 2026-02-09T08:43:28Z — **End**: 2026-02-09T08:52:00Z (8m 32s)
-- **Start (run 2)**: 2026-02-09T10:36:36Z — **End**: 2026-02-09T10:44:00Z (~7m 24s)
-- **Start (run 3)**: 2026-02-09T11:36:36Z — **End**: 2026-02-09T11:50:00Z (~13m 24s)
-- **Exit reason**: converged (2 consecutive zero-patch iterations)
-- **Total iterations**: 8 (6 productive + 2 convergence across 3 runs)
-- **Data sources available**:
-  - Plugin debug log: NO (debug.log not found — skipping log analysis)
-  - Session history: NO (search-opencode-history.ts unavailable — skipping session history)
-  - Git log: YES
-  - `but` CLI: YES (returns "setup_required" — expected for plugin repo, not a GitButler workspace)
-
----
-
-## Executive Summary
-
-- **Total patches proposed**: 15
-- **Total patches applied**: 14
-- **Total patches rejected**: 2 (1 overlap, 1 false positive)
-- **Files modified**: `src/config.ts`, `src/plugin.ts`, `src/auto-update.ts`, `src/index.ts`
-- **Key findings (run 1 — iterations 1-2)**:
-  - Invalid regex in user config could crash plugin at initialization (HIGH)
-  - Timer leak in auto-update + unhandled promise rejection (HIGH)
-  - 6 `Bun.spawnSync` calls without try/catch (MEDIUM)
-  - Negative/zero numeric config values accepted (MEDIUM)
-  - Non-null assertion on `Map.get()` (MEDIUM)
-- **Key findings (run 2 — iterations 3-4)**:
-  - `butCursor()` stdout piped but never consumed → potential deadlock (CRITICAL)
-  - `butCursor()` exceptions propagate to hook handlers → lock leaks, broken state (HIGH)
-  - `stripJsonComments` unclosed block comment reads past intended bounds (MEDIUM)
-  - `postStopProcessing` branch loop failure aborts all remaining branches (HIGH)
-
----
-
-## Iteration Log
-
-### Iteration 1 (Run 1)
-
-**Timestamp**: 2026-02-09T08:44:00Z
-
-**Analysis**:
-- Sources consulted: git log, static code analysis (3 explore agents)
-- Issues found: 4 (ranked by severity)
-- Top issues:
-  - `new RegExp(config.default_branch_pattern)` with no try/catch: HIGH, plugin.ts:367
-  - Timer not cleared on fetch failure in `checkForUpdate`: HIGH, auto-update.ts:80-90
-  - Missing `.catch()` on eager promise in `createAutoUpdateHook`: HIGH, auto-update.ts:142-149
-  - No regex validation in `loadConfig`: MEDIUM, config.ts:124-126
-
-**Patches**: Proposed: 3 | Applied: 3 | Rejected: 0
-
-**Changes**:
-- `src/config.ts`: Added `isValidRegex()` helper; changed `default_branch_pattern` validation from type-only to type+regex-validity check
-- `src/plugin.ts`: Wrapped `new RegExp(config.default_branch_pattern)` in try/catch with fallback to `DEFAULT_CONFIG.default_branch_pattern`
-- `src/auto-update.ts`: Moved `clearTimeout(timer)` to `finally` block in `checkForUpdate`; added `.catch()` and `.finally()` to the eagerly-fired promise in `createAutoUpdateHook`
-
----
-
-### Iteration 2 (Run 1)
-
-**Timestamp**: 2026-02-09T08:48:00Z
-
-**Analysis**:
-- Sources consulted: git log, agent findings (all 3 completed)
-- Issues found: 8+ remaining, 3 selected for patching
-- Top issues:
-  - 6 Bun.spawnSync helpers without try/catch: MEDIUM, plugin.ts (multiple locations)
-  - Negative/zero numeric config values accepted: MEDIUM, config.ts:112-120
-  - Non-null assertion on Map.get(): MEDIUM, plugin.ts:214
-
-**Patches**: Proposed: 3 | Applied: 3 | Rejected: 0
-
-**Changes**:
-- `src/plugin.ts`: Wrapped `isWorkspaceMode`, `findFileBranch`, `butRub`, `butUnapply`, `getFullStatus`, `butReword` in try/catch
-- `src/config.ts`: Added `> 0` validation for `llm_timeout_ms`, `max_diff_chars`, `branch_slug_max_length`
-- `src/plugin.ts`: Replaced `Map.get(rootID)!.push(...)` with nullish coalescing `?? []` pattern
-
----
-
-### Iteration 3 (Run 2)
-
-**Timestamp**: 2026-02-09T10:40:00Z
-
-**Analysis**:
-- Sources consulted: git log, `but` CLI status, 3 parallel explore agents (unsafe type assertions, error handling/race conditions, string processing edge cases), direct AST-grep searches
-- Issues found: 13+ across 3 categories
-- Top issues selected for patching:
-  - `butCursor()` stdout piped but never consumed → deadlock risk: CRITICAL, plugin.ts:778
-  - `butCursor()` exceptions unhandled in both hook handlers → lock leaks: HIGH, plugin.ts:1107+1188
-  - `stripJsonComments` block comment while loop reads past bounds: MEDIUM, config.ts:71-76
-
-**Patches**: Proposed: 3 | Applied: 3 | Rejected: 0
-
-**Changes**:
-- `src/plugin.ts:778`: Changed `stdout: "pipe"` to `stdout: "ignore"` in `butCursor()` — stdout was never consumed; if `but cursor` writes >64KB, the process blocks and hook handler deadlocks
-- `src/plugin.ts:1107-1125, 1195-1211`: Wrapped both `butCursor("after-edit")` and `butCursor("stop")` calls in try/catch — exceptions now logged and swallowed, ensuring `conversationsWithEdits.add()`, `savePluginState()`, and `postStopProcessing()` still execute
-- `src/config.ts:65-76`: Replaced manual block comment parsing loop with `indexOf("*/")` — handles unclosed comments cleanly (consume to end of string); added `i + 1 < len` guard on single-line comment detection
-
----
-
-### Iteration 4 (Run 2)
-
-**Timestamp**: 2026-02-09T10:43:00Z
-
-**Analysis**:
-- Sources consulted: re-evaluation of remaining issues from agent findings
-- Issues found: 1 actionable remaining
-- Top issue:
-  - `postStopProcessing` branch-processing loop: `await generateLLMCommitMessage()` inside nested for-loop with no try/catch — one branch failure aborts all remaining branches: HIGH, plugin.ts:649-690
-
-**Patches**: Proposed: 1 | Applied: 1 | Rejected: 0
-
-**Changes**:
-- `src/plugin.ts:649-690`: Wrapped per-branch reword/rename body in try/catch with error logging — one branch failure no longer aborts processing of remaining branches
-
----
-
-### Iteration 5 (Run 3)
-
-**Timestamp**: 2026-02-09T11:36:00Z
-
-**Analysis**:
-- Sources consulted: git log, Oracle consultation, 2 parallel explore agents (error handling gaps + logic bugs), direct AST-grep + grep searches
-- Issues found: 6 actionable, 3 selected for patching, 1 rejected (overlap)
-- Top issues:
-  - `butReword()` return value ignored — success assumed even on failure: HIGH, plugin.ts:715
-  - `saveSessionMap()` unguarded `await` can crash hook handlers: HIGH, plugin.ts:933,965
-  - `loadCommands` for-loop body has no try/catch — one bad command file kills init: MEDIUM, index.ts:89-116
-  - Lock timeout steal (REJECTED — overlaps ±5 lines with iteration 3): MEDIUM, plugin.ts:1086-1098
-
-**Patches**: Proposed: 4 | Applied: 3 | Rejected: 1 (overlap with iteration 3 at plugin.ts:1107)
-
-**Changes**:
-- `src/plugin.ts:715-760`: Check `butReword()` return value before recording success — on failure, log warning and `continue` to next branch instead of polluting `rewordedBranches` set and emitting false-success notifications
-- `src/plugin.ts:948-959,985-997`: Wrap both `saveSessionMap()` call sites (subagent mapping + session.created) in try/catch with `log.warn` — prevents file I/O errors from breaking hook execution
-- `src/index.ts:90-120`: Wrap `loadCommands` for-loop body in try/catch — one unreadable command .md file no longer aborts plugin initialization
-
-**Rejections**:
-- `src/plugin.ts:1086-1098`: Lock timeout abort fix — overlaps ±5 lines with iteration 3 patch at src/plugin.ts:1107
-
----
-
-### Iteration 6 (Run 3)
-
-**Timestamp**: 2026-02-09T11:36:00Z
-
-**Analysis**:
-- Sources consulted: remaining candidates from Oracle + explore agent findings, overlap zone recalculation
-- Issues found: 2 candidates, 1 patchable, 1 false positive
-- Top issue:
-  - `hasMultiBranchHunks` counts stacks instead of branches — semantic bug causes false positives in multi-branch detection: MEDIUM, plugin.ts:1036-1048
-
-**Patches**: Proposed: 2 | Applied: 1 | Rejected: 1 (false positive)
-
-**Changes**:
-- `src/plugin.ts:1036-1048`: Fix `hasMultiBranchHunks` to iterate through `branch.commits` instead of `stack.assignedChanges` — correctly detects multi-branch file ownership
-
-**Rejections**:
-- `src/index.ts:55-60`: parseFrontmatter colon-in-value — REJECTED as false positive (indexOf + slice already preserves all subsequent colons)
-
----
-
-### Iteration 7 (Run 3)
-
-**Timestamp**: 2026-02-09T11:48:00Z
-
-**Analysis**: Full sweep of remaining issues — all are architectural (lock redesign), by-design (fire-and-forget catches), or in overlap zones.
-
-**Patches**: Proposed: 0 | Applied: 0 | Rejected: 0
-
-consecutive_zero_patch_count = 1
-
----
-
-### Iteration 8 (Run 3)
-
-**Timestamp**: 2026-02-09T11:49:00Z
-
-**Analysis**: Same assessment — no new patchable issues.
-
-**Patches**: Proposed: 0 | Applied: 0 | Rejected: 0
-
-consecutive_zero_patch_count = 2 → **Convergence stop condition met**
-
----
-
-## Patch Ledger
-
-| Iteration | File(s) | Region | Status | Description |
-|-----------|---------|--------|--------|-------------|
-| 1 | src/config.ts | 87-96, 133-135 | applied | Add `isValidRegex` helper + validate `default_branch_pattern` |
-| 1 | src/plugin.ts | 367-373 | applied | Wrap `new RegExp(...)` in try/catch with fallback |
-| 1 | src/auto-update.ts | 76-106, 142-155 | applied | Fix timer leak (finally block) + add .catch()/.finally() on eager promise |
-| 2 | src/plugin.ts | 151-165, 276-341, 343-355, 596-627 | applied | Wrap 6 spawnSync helpers in try/catch |
-| 2 | src/config.ts | 122-130 | applied | Positive-number validation for numeric config fields |
-| 2 | src/plugin.ts | 206-217 | applied | Remove non-null assertion, use `?? []` pattern |
-| 3 | src/plugin.ts | 778 | applied | Change butCursor stdout: "pipe" → "ignore" (prevent deadlock) |
-| 3 | src/plugin.ts | 1107-1125, 1195-1211 | applied | try/catch on butCursor calls in hook handlers |
-| 3 | src/config.ts | 65-76 | applied | stripJsonComments block comment bounds fix (indexOf) |
-| 4 | src/plugin.ts | 649-690 | applied | try/catch per-branch in postStopProcessing loop |
-| 5 | src/plugin.ts | 715-760 | applied | Check butReword() return value before recording success |
-| 5 | src/plugin.ts | 948-959, 985-997 | applied | Wrap saveSessionMap() in try/catch with log.warn |
-| 5 | src/index.ts | 90-120 | applied | try/catch in loadCommands for-loop body |
-| 5 | src/plugin.ts | 1086-1098 | rejected | Overlaps ±5 lines with iteration 3 at plugin.ts:1107 |
-| 6 | src/plugin.ts | 1036-1048 | applied | Fix hasMultiBranchHunks to count branches not stacks |
-| 6 | src/index.ts | 55-60 | rejected | False positive — colon handling already correct |
-
----
-
-## Remaining Issues
-
-Issues identified but not addressed (for manual review):
-
-- **TOCTOU race in file lock mechanism** (plugin.ts ~1086-1098): HIGH — Lock acquisition has check-then-set gap across async yields. Could not be patched (overlaps iteration 3 zone). Requires mutex or atomic CAS redesign. Mitigated by JavaScript's single-threaded sync execution, but vulnerable between `await` points.
-- **Race in parentSessionByTaskSession concurrent writes** (plugin.ts ~929-970): HIGH — Two hooks can write to shared map and call `saveSessionMap()` concurrently. Write failures are now caught (iteration 5), but concurrent writes can still lose data. Requires write queue or debounced persistence.
-- **7 unsafe `as Type` casts on untrusted JSON** (plugin.ts, config.ts, auto-update.ts): MEDIUM — External data (file reads, CLI stdout, API responses) cast without runtime validation. Requires structural validation helpers (e.g., Zod) or manual type guards.
-- **index.ts:9 pkg.version no validation** (index.ts:9-10): MEDIUM — `pkg.version` accessed without null check. Bundled file so low practical risk.
-- **toBranchSlug silently strips Unicode** (plugin.ts:443-452): MEDIUM — Design choice. Non-ASCII characters produce generic "opencode-session" branch name.
-- **Duplicate guard uses globalThis string key** (index.ts:121-128): LOW — Module reload prevention. Low risk in practice.
-
----
-
-## Summary
-
-**Loop exit**: converged
-
-**Verification**:
-- Build (`bun run build`): PASS
-- Tests (`bun test`): 22 pass, 0 fail
-- Public API exports: All 5 unchanged (GitButlerPlugin, DEFAULT_CONFIG, loadConfig, stripJsonComments, GitButlerPluginConfig)
-- LSP diagnostics: 0 errors across all modified files
-- No git commits created
-- All patches are local-only
-
-**Diff stats (cumulative)**: 2 files changed, 81 insertions(+), 40 deletions(-)
-
-**Recommendations for next run**:
-- The file lock mechanism (TOCTOU race) needs architectural redesign — cannot be patched incrementally due to overlap constraints
-- Consider adding Zod or manual type guards for JSON parsed from external sources (CLI stdout, file reads)
-- `parentSessionByTaskSession` concurrent write race needs a write queue/debounce
-
-**Checkpoint files created**:
-- `.opencode/analysis-loop/checkpoint-1.patch`
-- `.opencode/analysis-loop/checkpoint-2.patch`
-- `.opencode/analysis-loop/checkpoint-3.patch`
-- `.opencode/analysis-loop/checkpoint-5.patch`
-- `.opencode/analysis-loop/checkpoint-6.patch`
-
-**Final state**:
-- All patches are local-only (not committed)
-- Patch ledger saved to `.opencode/analysis-loop/patch-ledger.json`
-- Final diff available at `.opencode/analysis-loop/final-changes.patch`
-- To review changes: `git diff -- src/`
-- To revert: `git checkout -- src/`
+- **Project**: `/Users/gabrielecegi/bp/t/andocs`
+- **Context**: consumer project (runtime telemetry from real usage)
+- **Date**: 2026-02-09T17:27:00+01:00
+- **Duration**: ~18m
+- **Data sources**:
+  - `[OK]` Plugin debug log: `/Users/gabrielecegi/bp/t/andocs/.opencode/plugin/debug.log`
+  - `[OK]` Session history: OpenCode sessions for `andocs` project
+  - `[OK]` Git log: `git log --oneline -80`
+  - `[OK]` `but` CLI status: `but status --json -f`
+- **Iterations**: 6 clusters + cross-cutting synthesis
+
+## Feature Scorecard
+
+| # | Feature | Status | Success Rate | Key Evidence |
+|---|---------|--------|--------------|--------------|
+| 1 | Post-edit hook | Working | ~85% observed edit paths | `after-edit` 182, `cursor-ok(after-edit)` 155, `rub-ok` 70 |
+| 2 | Stop/idle hook | Degraded | ~89% (stop ok with retries) | `session-stop` 302, `cursor-ok(stop)` 350, `cursor-error(stop)` 34 |
+| 3 | Pre-edit lock serialization | Degraded | High but imperfect | `lock-acquired` 617, `lock-timeout` 2, mixed legacy/new lock-release telemetry |
+| 4 | Branch creation (session -> branch) | Working | Observed | `after-edit` with stable `conversationId`; branches materialized in `but status` |
+| 5 | File-to-branch assignment | Degraded | Partial | `but status` currently shows unassigned `g0` for `agent-tools/gh-tool/pr.ts` |
+| 6 | Auto-assign existing branch (`but rub`) | Working | 100% in observed logs | `rub-ok` 70, no `rub-failed` observed |
+| 7 | No phantom branches for read-only sessions | Working | 100% in sampled check | `stop_without_after = 0`, `stop_ok_without_after = 0` |
+| 8 | Empty branch cleanup | Degraded | 94% (17/18) | `cleanup-ok` 17, `cleanup-failed` 1 (`ge-branch-139`) |
+| 9 | Auto-commit on stop | Degraded | Mostly works | stop flow present, but periodic lock/DB errors in historical log |
+| 10 | LLM commit message generation | Working | 100% in recent NDJSON sample | `llm-start` 1 -> `llm-success` 1; many `reword` entries with `source:"llm"` |
+| 11 | Deterministic fallback path | Working | Present | `reword` entries with `source:"deterministic"` observed |
+| 12 | Commit reword | Working | High | `reword` 70, no `reword-failed` / `reword-error` matches |
+| 13 | Branch auto-rename (`ge-branch-N`) | Working | Observed | Notification evidence: `Branch renamed from ge-branch-* ...` (4 matches) |
+| 14 | No rename of user-named branches | Working | Observed | Rename notifications only target `ge-branch-*` |
+| 15 | Context injection | Working | High | `notification-queued` 126 -> `context-injected` 43 |
+| 16 | Session title sync | Working | High | 56 `Session title updated to ...` notifications |
+| 17 | Session mapping for subagents | Working | Observed | `session-map-subagent` 7 with parent linkage |
+| 18 | No cross-session branch leaks | Untested | N/A | No direct collision marker; not provable from current logs alone |
+| 19 | State persistence across restart | Working | High | `state-loaded` 58 with non-zero counts |
+| 20 | Stale lock cleanup robustness | Degraded | High but not zero-failure | `lock-timeout` present (2), no explicit `lock-stale` events in sample window |
+| 21 | Rub multi-branch guard | Untested | N/A | No `rub-skip-multi-branch` events observed |
+
+**Summary**: 14 Working, 6 Degraded, 0 Broken, 2 Untested
+
+## Findings
+
+### Critical (Broken)
+- None observed as consistently broken in sampled runtime data.
+
+### Important (Degraded)
+
+#### 1) Assignment drift still appears in active workspace
+- **User experience**: A file with recent branch history can appear as unassigned, requiring manual cleanup.
+- **Evidence**: `but status --json -f` currently reports unassigned `g0` for `agent-tools/gh-tool/pr.ts` while related branch work exists.
+- **Root cause (hypothesis)**: Race/order edge case between post-edit flow, branch status refresh, and `rub` assignment path.
+- **Suggested direction**: Add post-stop/periodic assignment reconciliation and explicit telemetry for assignment decisions.
+
+#### 2) Stop flow reliability has intermittent DB/reference failures
+- **User experience**: Occasional stop-cycle hiccups (retry/failure logs), potential delayed commit/reword/cleanup.
+- **Evidence**: historical `cursor-error` includes `database is locked`, workspace reference mismatch, `Stack not found`.
+- **Root cause (hypothesis)**: transient GitButler DB/workspace contention under rapid multi-session activity.
+- **Suggested direction**: keep bounded retries + classify transient vs terminal stop errors in metrics dashboards.
+
+#### 3) Empty cleanup is not fully reliable
+- **User experience**: Some empty `ge-branch-*` artifacts linger.
+- **Evidence**: `cleanup-ok` 17 vs `cleanup-failed` 1.
+- **Root cause (hypothesis)**: branch state changed during cleanup window or CLI refusal due workspace state.
+- **Suggested direction**: deferred retry queue for cleanup-failed branches with guardrails.
+
+#### 4) Locking mostly works but still times out in rare cases
+- **User experience**: rare edit path stalls/lock waits.
+- **Evidence**: `lock-timeout` 2 events.
+- **Root cause (hypothesis)**: long-running competing operations with no stale-release trigger in those windows.
+- **Suggested direction**: enrich lock telemetry with owner age + operation type; introduce adaptive stale thresholds.
+
+### Improvement Opportunities
+
+#### 5) Rename observability is split
+- **User experience**: branch rename works, but dedicated `branch-rename` categories are sparse; evidence appears mainly via notifications.
+- **Evidence**: rename message notifications exist; direct category hits are minimal in current mixed-format log.
+- **Root cause (hypothesis)**: legacy/new log format overlap and partial category adoption.
+- **Suggested direction**: normalize all rename outcomes to structured `branch-rename` / `branch-rename-failed` entries.
+
+#### 6) Cross-session leak guard lacks explicit proof metric
+- **User experience**: behavior looks healthy, but operator cannot prove isolation quickly.
+- **Evidence**: `session-map-subagent` exists, but no explicit per-root branch ownership assertion.
+- **Root cause (hypothesis)**: observability gap, not necessarily functional gap.
+- **Suggested direction**: emit periodic root-session -> branch mapping snapshots for auditability.
+
+## External Context (Research)
+- Git automation pitfalls from external evidence strongly match observed local risks:
+  - DB/workspace contention during concurrent operations
+  - assignment/reconciliation drift
+  - commit/rename trust/quality observability gaps
+- GitButler CLI semantics from official docs/source are consistent with plugin expectations (`cursor`, `rub`, `reword`, `status --json -f`).
+
+## Raw Data Summary
+- **debug.log**: 2024 lines total; categories include 617 `lock-acquired`, 471 `cursor-ok`, 182 `after-edit`, 70 `rub-ok`, 70 `reword`, 126 `notification-queued`, 43 `context-injected`.
+- **warn/error-like events**: 37 inferred from legacy categories (`*error*`, `*failed*`, `*timeout*`), including 34 `cursor-error`, 2 `lock-timeout`, 1 `cleanup-failed`.
+- **but status**: 3 active stacks/branches in current workspace snapshot, 1 unassigned change.
+- **Session history**: active multi-session usage confirmed (recent high-volume `andocs` sessions).
+- **Git log**: 80 recent commits reviewed for branch/reword flow context.
+
+## Recommendations
+1. Prioritize assignment reconciliation telemetry and recovery for unassigned drift cases.
+2. Add explicit stop-flow reliability counters (retry count, terminal vs transient classification).
+3. Implement cleanup retry policy for `cleanup-failed` with cooldown/backoff.
+4. Normalize rename telemetry into dedicated structured categories across all codepaths.
+5. Add an explicit isolation audit event proving root-session to branch ownership (for leak detection).

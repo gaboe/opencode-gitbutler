@@ -2,6 +2,7 @@
 node_modules/
 
 # Build outputs
+dist/
 *.tsbuildinfo
 
 # Environment
@@ -21,3 +22,6 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+
+# opensrc - source code for packages
+opensrc/

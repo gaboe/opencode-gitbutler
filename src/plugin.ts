@@ -2,9 +2,9 @@
  * OpenCode plugin: GitButler integration via Cursor hook facade.
  *
  * Bridges OpenCode's plugin hooks to GitButler's `but cursor` CLI:
- * - tool.execute.after (edit/write)                  → but cursor after-edit
- * - session.idle                                     → but cursor stop
- * - experimental.chat.messages.transform             → inject pending state notifications
+ * - tool.execute.after (edit/write)                  -> but cursor after-edit
+ * - session.idle                                     -> but cursor stop
+ * - experimental.chat.messages.transform             -> inject pending state notifications
  *
  * This enables automatic branch creation, file-to-branch assignment,
  * and auto-commit when using GitButler workspace mode with OpenCode.
@@ -16,192 +16,44 @@
  * conversation_id isolation in GitButler's session tracking.
  */
 
-import { resolve, relative } from "node:path";
-import { appendFile } from "node:fs/promises";
 import type { Plugin } from "@opencode-ai/plugin";
 import type { GitButlerPluginConfig } from "./config.js";
 import { DEFAULT_CONFIG } from "./config.js";
-
-const LOG_PATH_SUFFIX = ".opencode/plugin/debug.log";
-
-type LogLevel = "info" | "warn" | "error";
-
-type Logger = {
-  info: (cat: string, data?: Record<string, unknown>) => void;
-  warn: (cat: string, data?: Record<string, unknown>) => void;
-  error: (cat: string, data?: Record<string, unknown>) => void;
-};
-
-/**
- * Structured NDJSON logger with explicit levels.
- *
- * Each line is a self-contained JSON object:
- *   {"ts":"...","level":"info","cat":"cursor-ok","subcommand":"after-edit",...}
- *
- * Reserved keys: ts, level, cat. All data fields are spread at top level.
- * Parseable with: jq, grep, or any NDJSON-aware tool.
- * Filter examples:
- *   jq 'select(.level == "error")'
- *   jq 'select(.cat == "cursor-ok")'
- *   grep '"cat":"llm-' debug.log | jq .
- */
-function createLogger(logEnabled: boolean, cwd: string): Logger {
-  function write(
-    level: LogLevel,
-    cat: string,
-    data: Record<string, unknown> = {}
-  ): void {
-    if (!logEnabled) return;
-    const entry = {
-      ts: new Date().toISOString(),
-      level,
-      cat,
-      ...data,
-    };
-    appendFile(
-      `${cwd}/${LOG_PATH_SUFFIX}`,
-      JSON.stringify(entry) + "\n"
-    ).catch(() => {});
-  }
-
-  return {
-    info: (cat, data) => write("info", cat, data ?? {}),
-    warn: (cat, data) => write("warn", cat, data ?? {}),
-    error: (cat, data) => write("error", cat, data ?? {}),
-  };
-}
-
-type HookInput = {
-  tool?: string;
-  sessionID?: string;
-  callID?: string;
-};
-
-type HookOutput = {
-  title?: string;
-  output?: string;
-  metadata?: {
-    /** edit tool: file diff with before/after content */
-    filediff?: {
-      file?: string;
-      before?: string;
-      after?: string;
-    };
-    /** write tool: absolute file path */
-    filepath?: string;
-    diff?: string;
-    [key: string]: unknown;
-  };
-  [key: string]: unknown;
-};
-
-type EventPayload = Record<string, unknown> & {
-  type?: string;
-  properties?: Record<string, unknown>;
-};
-
-const SUBAGENT_TOOLS = new Set([
-  "agent",
-  "task",
-  "delegate_task",
-]);
+import { createLogger } from "./logger.js";
+import { createCli } from "./cli.js";
+import type { HookOutput } from "./cli.js";
+import { createStateManager } from "./state.js";
+import type { HookInput, EventPayload, BranchOwnership } from "./state.js";
+import { createNotificationManager } from "./notify.js";
+import { createRewordManager } from "./reword.js";
 
 export function createGitButlerPlugin(
-  config: GitButlerPluginConfig = { ...DEFAULT_CONFIG }
+  config: GitButlerPluginConfig = { ...DEFAULT_CONFIG },
 ): Plugin {
   return async ({ client, directory, worktree }) => {
   const cwd = worktree ?? directory;
   const log = createLogger(config.log_enabled, cwd);
-  const SESSION_MAP_PATH = `${cwd}/.opencode/plugin/session-map.json`;
-  const PLUGIN_STATE_PATH = `${cwd}/.opencode/plugin/plugin-state.json`;
+  const cli = createCli(cwd, log);
+  const state = createStateManager(cwd, log);
 
-  type PluginState = {
-    conversationsWithEdits: string[];
-    rewordedBranches: string[];
-  };
-
-  async function loadPluginState(): Promise<PluginState> {
-    try {
-      const file = Bun.file(PLUGIN_STATE_PATH);
-      if (!(await file.exists()))
-        return {
-          conversationsWithEdits: [],
-          rewordedBranches: [],
-        };
-      return (await file.json()) as PluginState;
-    } catch {
-      return {
-        conversationsWithEdits: [],
-        rewordedBranches: [],
-      };
-    }
+  // Hydrate session map from disk
+  const diskSessionMap = await state.loadSessionMap();
+  for (const [k, v] of diskSessionMap) {
+    state.parentSessionByTaskSession.set(k, v);
   }
 
-  async function savePluginState(
-    conversations: Set<string>,
-    reworded: Set<string>
-  ): Promise<void> {
-    const state: PluginState = {
-      conversationsWithEdits: [...conversations],
-      rewordedBranches: [...reworded],
-    };
-    await Bun.write(
-      PLUGIN_STATE_PATH,
-      JSON.stringify(state, null, 2) + "\n"
-    );
-  }
+  const branchOwnership = new Map<string, BranchOwnership>();
 
-  async function loadSessionMap(): Promise<
-    Map<string, string>
-  > {
-    try {
-      const file = Bun.file(SESSION_MAP_PATH);
-      if (!(await file.exists())) return new Map();
-      const data = (await file.json()) as Record<
-        string,
-        string
-      >;
-      return new Map(Object.entries(data));
-    } catch {
-      return new Map();
-    }
-  }
-
-  async function saveSessionMap(
-    map: Map<string, string>
-  ): Promise<void> {
-    await Bun.write(
-      SESSION_MAP_PATH,
-      JSON.stringify(Object.fromEntries(map), null, 2) +
-        "\n"
-    );
-  }
-
-  function isWorkspaceMode(): boolean {
-    try {
-      const proc = Bun.spawnSync(
-        ["git", "symbolic-ref", "--short", "HEAD"],
-        { cwd, stdout: "pipe", stderr: "pipe" }
-      );
-      if (proc.exitCode !== 0) return false;
-      return (
-        proc.stdout.toString().trim() ===
-        "gitbutler/workspace"
-      );
-    } catch {
-      return false;
-    }
-  }
-
-  const parentSessionByTaskSession = await loadSessionMap();
-
-  const persistedState = await loadPluginState();
+  const persistedState = await state.loadPluginState();
   const conversationsWithEdits = new Set<string>(
-    persistedState.conversationsWithEdits
+    persistedState.conversationsWithEdits,
   );
   const rewordedBranches = new Set<string>(
-    persistedState.rewordedBranches
+    persistedState.rewordedBranches,
   );
+  for (const [convId, ownership] of Object.entries(persistedState.branchOwnership ?? {})) {
+    branchOwnership.set(convId, ownership);
+  }
   log.info("state-loaded", {
     conversations: conversationsWithEdits.size,
     reworded: rewordedBranches.size,
@@ -210,8 +62,8 @@ export function createGitButlerPlugin(
     commitModel: config.commit_message_model,
   });
   log.info("plugin-init", {
-    workspaceMode: isWorkspaceMode(),
-    sessionMapSize: parentSessionByTaskSession.size,
+    workspaceMode: cli.isWorkspaceMode(),
+    sessionMapSize: state.parentSessionByTaskSession.size,
   });
 
   // Guard set: session IDs created internally for LLM commit message generation.
@@ -225,191 +77,7 @@ export function createGitButlerPlugin(
   // Main session tracking for context injection fallback
   let mainSessionID: string | undefined;
 
-  // --- Pending context notifications ---
-  // Accumulated during plugin operations (reword, rename, cleanup).
-  // Injected into the agent's next user message via
-  // experimental.chat.messages.transform hook.
-  type ContextNotification = {
-    message: string;
-    timestamp: number;
-  };
-
-  const pendingNotifications = new Map<
-    string,
-    ContextNotification[]
-  >();
-
-  function addNotification(
-    sessionID: string | undefined,
-    message: string
-  ): void {
-    const rootID = resolveSessionRoot(sessionID);
-    const existing = pendingNotifications.get(rootID) ?? [];
-    existing.push({
-      message,
-      timestamp: Date.now(),
-    });
-    pendingNotifications.set(rootID, existing);
-    log.info("notification-queued", {
-      rootID,
-      message,
-    });
-  }
-
-  function consumeNotifications(
-    sessionID: string
-  ): string | null {
-    const rootID = resolveSessionRoot(sessionID);
-    const notifications = pendingNotifications.get(rootID);
-    if (!notifications || notifications.length === 0)
-      return null;
-    pendingNotifications.delete(rootID);
-
-    const lines = notifications
-      .map((n) => `- ${n.message}`)
-      .join("\n");
-    return [
-      "<system-reminder>",
-      "[GITBUTLER STATE UPDATE]",
-      "The following happened automatically since your last response:",
-      "",
-      lines,
-      "",
-      "This is informational — no action needed unless relevant to your current task.",
-      "</system-reminder>",
-    ].join("\n");
-  }
-
-  const resolvedCwd = resolve(cwd);
-
-  type ButStatusChange = {
-    cliId?: string;
-    filePath?: string;
-  };
-  type ButStatusCommit = {
-    changes?: ButStatusChange[];
-  };
-  type ButStatusJson = {
-    unassignedChanges?: ButStatusChange[];
-    stacks?: Array<{
-      assignedChanges?: ButStatusChange[];
-      branches?: Array<{
-        cliId?: string;
-        name?: string;
-        commits?: ButStatusCommit[];
-      }>;
-    }>;
-  };
-
-  type FileBranchResult = {
-    inBranch: boolean;
-    branchCliId?: string;
-    branchName?: string;
-    unassignedCliId?: string;
-  };
-
-  function findFileBranch(
-    filePath: string
-  ): FileBranchResult {
-    try {
-      const proc = Bun.spawnSync(
-        ["but", "status", "--json", "-f"],
-        { cwd, stdout: "pipe", stderr: "pipe" }
-      );
-      if (proc.exitCode !== 0) return { inBranch: false };
-
-      const data = JSON.parse(
-        proc.stdout.toString()
-      ) as ButStatusJson;
-
-      const normalized = toRelativePath(filePath);
-
-      const unassigned = data.unassignedChanges?.find(
-        (ch) => ch.filePath === normalized
-      );
-
-      for (const stack of data.stacks ?? []) {
-        if (
-          stack.assignedChanges?.some(
-            (ch) => ch.filePath === normalized
-          )
-        ) {
-          return { inBranch: true };
-        }
-
-        for (const branch of stack.branches ?? []) {
-          for (const commit of branch.commits ?? []) {
-            if (
-              commit.changes?.some(
-                (ch) => ch.filePath === normalized
-              )
-            ) {
-              return {
-                inBranch: true,
-                branchCliId: branch.cliId,
-                branchName: branch.name,
-                unassignedCliId: unassigned?.cliId,
-              };
-            }
-          }
-        }
-      }
-
-      return { inBranch: false };
-    } catch {
-      return { inBranch: false };
-    }
-  }
-
-  function butRub(source: string, dest: string): boolean {
-    try {
-      const proc = Bun.spawnSync(
-        ["but", "rub", source, dest],
-        { cwd, stdout: "pipe", stderr: "pipe" }
-      );
-      return proc.exitCode === 0;
-    } catch {
-      return false;
-    }
-  }
-
-  function butUnapply(branchCliId: string): boolean {
-    try {
-      const proc = Bun.spawnSync(
-        ["but", "unapply", branchCliId],
-        { cwd, stdout: "pipe", stderr: "pipe" }
-      );
-      return proc.exitCode === 0;
-    } catch {
-      return false;
-    }
-  }
-
-  function toRelativePath(absPath: string): string {
-    const resolved = resolve(absPath);
-    const rel = relative(resolvedCwd, resolved);
-    if (rel.startsWith("..")) return absPath;
-    return rel;
-  }
-
-  type ButStatusBranch = {
-    cliId: string;
-    name: string;
-    branchStatus: string;
-    commits: Array<{
-      cliId: string;
-      commitId: string;
-      message: string;
-    }>;
-  };
-
-  type ButStatusFull = {
-    unassignedChanges?: ButStatusChange[];
-    stacks?: Array<{
-      assignedChanges?: ButStatusChange[];
-      branches?: ButStatusBranch[];
-    }>;
-  };
+  const notify = createNotificationManager(log, state.resolveSessionRoot);
 
   let DEFAULT_BRANCH_PATTERN: RegExp;
   try {
@@ -418,419 +86,80 @@ export function createGitButlerPlugin(
     DEFAULT_BRANCH_PATTERN = new RegExp(DEFAULT_CONFIG.default_branch_pattern);
   }
 
-  async function fetchUserPrompt(
-    sessionID: string
-  ): Promise<string | null> {
-    try {
-      const res = await client.session.messages({
-        path: { id: sessionID },
-        query: { limit: 5 },
-      });
-      if (!res.data) return null;
-      for (const msg of res.data) {
-        if (msg.info.role !== "user") continue;
-        const textPart = msg.parts.find(
-          (p: { type: string }) => p.type === "text"
-        ) as { type: "text"; text: string } | undefined;
-        if (textPart?.text) return textPart.text;
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  }
+  type FileLock = {
+    sessionID: string;
+    timestamp: number;
+    operation: string;
+  };
 
-  function toBranchSlug(prompt: string): string {
-    const cleaned = prompt
-      .replace(/[^a-zA-Z0-9\s-]/g, "")
-      .trim()
-      .toLowerCase()
-      .split(/\s+/)
-      .slice(0, 6)
-      .join("-");
-    return cleaned.slice(0, config.branch_slug_max_length) || "opencode-session";
-  }
+  const fileLocks = new Map<string, FileLock>();
 
-  const COMMIT_PREFIX_PATTERNS: Array<{
-    pattern: RegExp;
-    prefix: string;
-  }> = [
-    {
-      pattern: /\b(fix|bug|broken|repair|patch)\b/i,
-      prefix: "fix",
-    },
-    {
-      pattern: /\b(add|create|implement|new|feature)\b/i,
-      prefix: "feat",
-    },
-    {
-      pattern:
-        /\b(refactor|clean|restructure|reorganize)\b/i,
-      prefix: "refactor",
-    },
-    {
-      pattern: /\b(test|spec|coverage)\b/i,
-      prefix: "test",
-    },
-    {
-      pattern: /\b(doc|readme|documentation)\b/i,
-      prefix: "docs",
-    },
-    {
-      pattern: /\b(style|css|design|ui|layout)\b/i,
-      prefix: "style",
-    },
-    {
-      pattern: /\b(perf|performance|optimize|speed)\b/i,
-      prefix: "perf",
-    },
-  ];
+  const LOCK_TIMEOUT_MS = 60_000;
+  const LOCK_POLL_MS = 1_000;
+  const STALE_LOCK_MS = 5 * 60_000;
 
-  function detectCommitPrefix(text: string): string {
-    for (const {
-      pattern,
-      prefix,
-    } of COMMIT_PREFIX_PATTERNS) {
-      if (pattern.test(text)) return prefix;
-    }
-    return "chore";
-  }
-
-  function toCommitMessage(prompt: string): string {
-    const firstLine = prompt.split("\n")[0]?.trim() ?? "";
-    if (!firstLine)
-      return "chore: OpenCode session changes";
-    const prefix = detectCommitPrefix(firstLine);
-    const description = firstLine
-      .replace(
-        /^(fix|feat|refactor|test|docs|style|perf|chore)(\(.+?\))?:\s*/i,
-        ""
-      )
-      .trim();
-    const maxLen = 72 - prefix.length - 2;
-    const truncated =
-      description.length > maxLen
-        ? description.slice(0, maxLen - 3) + "..."
-        : description;
-    return `${prefix}: ${truncated || "OpenCode session changes"}`;
-  }
-
-  const LLM_TIMEOUT_MS = config.llm_timeout_ms;
-  const MAX_DIFF_CHARS = config.max_diff_chars;
-
-  async function generateLLMCommitMessage(
-    commitId: string,
-    userPrompt: string
-  ): Promise<string | null> {
-    try {
-      log.info("llm-start", {
-        commitId,
-        promptLength: userPrompt.length,
-      });
-
-      const diffProc = Bun.spawnSync(
-        [
-          "git",
-          "show",
-          commitId,
-          "--format=",
-          "--no-color",
-        ],
-        { cwd, stdout: "pipe", stderr: "pipe" }
-      );
-      if (diffProc.exitCode !== 0) return null;
-      const diff = diffProc.stdout.toString().trim();
-      if (!diff) return null;
-
-      const truncatedDiff =
-        diff.length > MAX_DIFF_CHARS
-          ? diff.slice(0, MAX_DIFF_CHARS) +
-            "\n... (truncated)"
-          : diff;
-
-      const sessionRes = await client.session.create({
-        body: { title: "commit-msg-gen" },
-      });
-      if (!sessionRes.data) return null;
-      const tempSessionId = sessionRes.data.id;
-      internalSessionIds.add(tempSessionId);
-
-      try {
-        const promptText = [
-          "Generate a one-line conventional commit message for this diff.",
-          "Format: type: description (max 72 chars total).",
-          "Types: feat, fix, refactor, test, docs, style, perf, chore.",
-          `User intent: "${userPrompt.split("\n")[0]?.trim().slice(0, 200) ?? ""}"`,
-          "",
-          "Diff:",
-          truncatedDiff,
-          "",
-          "Reply with ONLY the commit message, nothing else.",
-        ].join("\n");
-
-        const timeoutPromise = new Promise<null>(
-          (resolve) =>
-            setTimeout(() => resolve(null), LLM_TIMEOUT_MS)
-        );
-
-        const llmPromise = client.session.prompt({
-          path: { id: tempSessionId },
-          body: {
-            model: {
-              providerID: config.commit_message_provider,
-              modelID: config.commit_message_model,
-            },
-            system:
-              "You are a commit message generator. Output ONLY a single-line conventional commit message. No explanation, no markdown, no quotes, no code fences.",
-            tools: {},
-            parts: [
-              { type: "text" as const, text: promptText },
-            ],
-          },
+  function reapStaleLocks(): void {
+    const now = Date.now();
+    const staleCutoff = config.stale_lock_ms ?? STALE_LOCK_MS;
+    for (const [filePath, lock] of fileLocks.entries()) {
+      if (now - lock.timestamp > staleCutoff) {
+        fileLocks.delete(filePath);
+        log.info("lock-reaped", {
+          file: filePath,
+          owner: lock.sessionID,
+          ageMs: now - lock.timestamp,
+          operation: lock.operation,
         });
-
-        const response = await Promise.race([
-          llmPromise,
-          timeoutPromise,
-        ]);
-        if (
-          !response ||
-          !("data" in response) ||
-          !response.data
-        ) {
-          log.warn("llm-timeout-or-empty", {
-            commitId,
-          });
-          return null;
-        }
-
-        const textPart = (
-          response.data as {
-            parts: Array<{ type: string; text?: string }>;
-          }
-        ).parts.find((p) => p.type === "text");
-        if (!textPart?.text) return null;
-
-        const message = textPart.text
-          .trim()
-          .replace(/^["'`]+|["'`]+$/g, "")
-          .split("\n")[0]
-          ?.trim();
-        if (!message) return null;
-
-        const validPrefix =
-          /^(feat|fix|refactor|test|docs|style|perf|chore|ci|build)(\(.+?\))?:\s/;
-        if (!validPrefix.test(message)) {
-          log.warn("llm-invalid-format", {
-            commitId,
-            message,
-          });
-          return null;
-        }
-
-        if (message.length > 72)
-          return message.slice(0, 69) + "...";
-
-        log.info("llm-success", {
-          commitId,
-          message,
-        });
-        return message;
-      } finally {
-        internalSessionIds.delete(tempSessionId);
-        client.session
-          .delete({ path: { id: tempSessionId } })
-          .catch(() => {});
       }
-    } catch {
-      return null;
     }
   }
 
-  function getFullStatus(): ButStatusFull | null {
-    try {
-      const proc = Bun.spawnSync(
-        ["but", "status", "--json", "-f"],
-        { cwd, stdout: "pipe", stderr: "pipe" }
-      );
-      if (proc.exitCode !== 0) return null;
-      return JSON.parse(
-        proc.stdout.toString()
-      ) as ButStatusFull;
-    } catch {
-      return null;
+  const editedFilesPerConversation = new Map<string, Set<string>>();
+
+  const reword = createRewordManager({
+    cwd,
+    log,
+    cli,
+    config,
+    defaultBranchPattern: DEFAULT_BRANCH_PATTERN,
+    addNotification: notify.addNotification,
+    resolveSessionRoot: state.resolveSessionRoot,
+    conversationsWithEdits,
+    rewordedBranches,
+    branchOwnership,
+    editedFilesPerConversation,
+    savePluginState: state.savePluginState,
+    internalSessionIds,
+    reapStaleLocks,
+    client,
+  });
+
+  type AssignmentCacheEntry = {
+    branchCliId: string;
+    conversationId: string;
+    timestamp: number;
+  };
+  const assignmentCache = new Map<string, AssignmentCacheEntry>();
+  const ASSIGNMENT_CACHE_TTL_MS = 30_000;
+
+  // Cached workspace status for system prompt injection (avoids per-call Bun.spawnSync)
+  let cachedStatus: { data: ReturnType<typeof cli.getFullStatus>; timestamp: number } | null = null;
+  const STATUS_CACHE_TTL_MS = 10_000; // 10 seconds
+
+  function getCachedStatus(): ReturnType<typeof cli.getFullStatus> {
+    if (cachedStatus && Date.now() - cachedStatus.timestamp < STATUS_CACHE_TTL_MS) {
+      return cachedStatus.data;
     }
-  }
-
-  function butReword(
-    target: string,
-    message: string
-  ): boolean {
-    try {
-      const proc = Bun.spawnSync(
-        ["but", "reword", target, "-m", message],
-        { cwd, stdout: "pipe", stderr: "pipe" }
-      );
-      return proc.exitCode === 0;
-    } catch {
-      return false;
-    }
-  }
-
-  async function postStopProcessing(
-    sessionID: string | undefined
-  ): Promise<void> {
-    if (!sessionID) return;
-
-    const rootSessionID = resolveSessionRoot(sessionID);
-    log.info("post-stop-start", {
-      sessionID,
-      rootSessionID,
-    });
-    const prompt = await fetchUserPrompt(rootSessionID);
-    if (!prompt) return;
-
-    const status = getFullStatus();
-    if (!status?.stacks) return;
-
-    let latestBranchName: string | null = null;
-
-    for (const stack of status.stacks) {
-      for (const branch of stack.branches ?? []) {
-        if (branch.branchStatus !== "completelyUnpushed")
-          continue;
-        if (branch.commits.length === 0) continue;
-        if (rewordedBranches.has(branch.cliId)) continue;
-
-        const commit = branch.commits[0];
-        if (!commit) continue;
-
-        try {
-          const llmMessage = await generateLLMCommitMessage(
-            commit.commitId,
-            prompt
-          );
-          const commitMsg =
-            llmMessage ?? toCommitMessage(prompt);
-          const rewordOk = butReword(commit.cliId, commitMsg);
-          if (!rewordOk) {
-            log.warn("reword-failed", {
-              branch: branch.name,
-              commit: commit.cliId,
-              message: commitMsg,
-            });
-            continue;
-          }
-          rewordedBranches.add(branch.cliId);
-          savePluginState(
-            conversationsWithEdits,
-            rewordedBranches
-          ).catch(() => {});
-
-          addNotification(
-            sessionID,
-            `Commit on branch \`${branch.name}\` reworded to: "${commitMsg}"`
-          );
-
-          log.info("reword", {
-            branch: branch.name,
-            commit: commit.cliId,
-            message: commitMsg,
-            source: llmMessage ? "llm" : "deterministic",
-            multi: branch.commits.length > 1,
-          });
-
-          if (DEFAULT_BRANCH_PATTERN.test(branch.name)) {
-            latestBranchName = toBranchSlug(prompt);
-            const renameOk = butReword(branch.cliId, latestBranchName);
-            if (renameOk) {
-              log.info("branch-rename", {
-                from: branch.name,
-                to: latestBranchName,
-              });
-              addNotification(
-                sessionID,
-                `Branch renamed from \`${branch.name}\` to \`${latestBranchName}\``
-              );
-            } else {
-              log.warn("branch-rename-failed", {
-                from: branch.name,
-                to: latestBranchName,
-              });
-              latestBranchName = branch.name;
-            }
-          } else {
-            latestBranchName = branch.name;
-          }
-        } catch (err) {
-          log.error("reword-error", {
-            branch: branch.name,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-    }
-
-    if (!latestBranchName) {
-      const existing = status.stacks
-        .flatMap((s) => s.branches ?? [])
-        .filter(
-          (b) =>
-            b.commits.length > 0 &&
-            !DEFAULT_BRANCH_PATTERN.test(b.name)
-        );
-      if (existing.length > 0) {
-        latestBranchName =
-          existing[existing.length - 1]!.name;
-      }
-    }
-
-    if (latestBranchName) {
-      client.session
-        .update({
-          path: { id: rootSessionID },
-          body: { title: latestBranchName },
-        })
-        .catch(() => {});
-      addNotification(
-        sessionID,
-        `Session title updated to \`${latestBranchName}\``
-      );
-    }
-
-    for (const stack of status.stacks) {
-      for (const branch of stack.branches ?? []) {
-        if (
-          branch.commits.length === 0 &&
-          (stack.assignedChanges?.length ?? 0) === 0 &&
-          DEFAULT_BRANCH_PATTERN.test(branch.name)
-        ) {
-          const ok = butUnapply(branch.cliId);
-          if (ok) {
-            addNotification(
-              sessionID,
-              `Empty branch \`${branch.name}\` cleaned up`
-            );
-          }
-          if (ok) {
-            log.info("cleanup-ok", {
-              branch: branch.name,
-            });
-          } else {
-            log.error("cleanup-failed", {
-              branch: branch.name,
-            });
-          }
-        }
-      }
-    }
+    const fresh = cli.getFullStatus();
+    cachedStatus = { data: fresh, timestamp: Date.now() };
+    return fresh;
   }
 
   async function toUUID(input: string): Promise<string> {
     const data = new TextEncoder().encode(input);
     const hash = await crypto.subtle.digest(
       "SHA-256",
-      data
+      data,
     );
     const hex = [...new Uint8Array(hash)]
       .map((b) => b.toString(16).padStart(2, "0"))
@@ -844,223 +173,6 @@ export function createGitButlerPlugin(
     ].join("-");
   }
 
-  const CURSOR_MAX_RETRIES = 3;
-  const CURSOR_RETRY_BASE_MS = 200;
-
-  async function butCursor(
-    subcommand: string,
-    payload: Record<string, unknown>
-  ) {
-    const json = JSON.stringify(payload);
-
-    for (
-      let attempt = 0;
-      attempt <= CURSOR_MAX_RETRIES;
-      attempt++
-    ) {
-      const proc = Bun.spawn(
-        ["but", "cursor", subcommand],
-        {
-          cwd,
-          stdout: "ignore",
-          stderr: "pipe",
-          stdin: new Blob([json]),
-        }
-      );
-      const exitCode = await proc.exited;
-
-      if (exitCode === 0) {
-        log.info("cursor-ok", {
-          subcommand,
-          conversationId: payload.conversation_id,
-          ...(attempt > 0 ? { retries: attempt } : {}),
-        });
-        return;
-      }
-
-      const stderr = await new Response(proc.stderr).text();
-      const isExpectedError =
-        stderr.includes("not in workspace mode") ||
-        stderr.includes("not initialized") ||
-        stderr.includes("No such file or directory") ||
-        stderr.includes("No hunk headers") ||
-        stderr.includes("no changes") ||
-        stderr.includes("checkout gitbutler/workspace");
-      if (isExpectedError) return;
-
-      const isRetryable =
-        stderr.includes("database is locked") ||
-        stderr.includes("SQLITE_BUSY") ||
-        stderr.includes("failed to lock file");
-      if (isRetryable && attempt < CURSOR_MAX_RETRIES) {
-        const delay = CURSOR_RETRY_BASE_MS * 2 ** attempt;
-        await Bun.sleep(delay);
-        continue;
-      }
-
-      log.error("cursor-error", {
-        subcommand,
-        exitCode,
-        stderr: stderr.trim(),
-        attempt,
-      });
-      throw new Error(
-        `but cursor ${subcommand} failed (exit ${exitCode}): ${stderr.trim()}`
-      );
-    }
-  }
-
-  function extractFilePath(
-    output: HookOutput
-  ): string | undefined {
-    return (
-      output.metadata?.filediff?.file ??
-      output.metadata?.filepath ??
-      undefined
-    );
-  }
-
-  function extractEdits(
-    output: HookOutput
-  ): Array<{ old_string: string; new_string: string }> {
-    const fd = output.metadata?.filediff;
-    if (fd?.before != null && fd?.after != null) {
-      return [
-        { old_string: fd.before, new_string: fd.after },
-      ];
-    }
-    return [];
-  }
-
-  async function trackSubagentMapping(
-    input: HookInput
-  ): Promise<void> {
-    const tool = input.tool;
-    const parentSessionID = input.sessionID;
-    const taskSessionID = input.callID;
-
-    if (!tool || !SUBAGENT_TOOLS.has(tool)) return;
-    if (!parentSessionID || !taskSessionID) return;
-
-    parentSessionByTaskSession.set(
-      taskSessionID,
-      parentSessionID
-    );
-    try {
-      await saveSessionMap(parentSessionByTaskSession);
-    } catch (err) {
-      log.warn("session-map-save-failed", {
-        task: taskSessionID,
-        parent: parentSessionID,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-    log.info("session-map-subagent", {
-      task: taskSessionID,
-      parent: parentSessionID,
-    });
-  }
-
-  async function trackSessionCreatedMapping(
-    event: EventPayload
-  ): Promise<void> {
-    if (event.type !== "session.created") return;
-
-    const properties = event.properties;
-    if (!properties) return;
-
-    const sessionID =
-      typeof properties.id === "string"
-        ? properties.id
-        : undefined;
-    const parentSessionID =
-      typeof properties.parentSessionID === "string"
-        ? properties.parentSessionID
-        : typeof properties.parent_session_id === "string"
-          ? properties.parent_session_id
-          : undefined;
-
-    if (!sessionID || !parentSessionID) return;
-
-    parentSessionByTaskSession.set(
-      sessionID,
-      parentSessionID
-    );
-    try {
-      await saveSessionMap(parentSessionByTaskSession);
-    } catch (err) {
-      log.warn("session-map-save-failed", {
-        session: sessionID,
-        parent: parentSessionID,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-    log.info("session-map-created", {
-      session: sessionID,
-      parent: parentSessionID,
-    });
-  }
-
-  function resolveSessionRoot(
-    sessionID: string | undefined
-  ): string {
-    if (!sessionID) return "opencode-default";
-
-    const seen = new Set<string>();
-    let current = sessionID;
-
-    while (true) {
-      if (seen.has(current)) return current;
-      seen.add(current);
-
-      const parent =
-        parentSessionByTaskSession.get(current);
-      if (!parent) return current;
-
-      current = parent;
-    }
-  }
-
-  function hasMultiBranchHunks(filePath: string): boolean {
-    try {
-      const proc = Bun.spawnSync(
-        ["but", "status", "--json", "-f"],
-        { cwd, stdout: "pipe", stderr: "pipe" }
-      );
-      if (proc.exitCode !== 0) return false;
-
-      const data = JSON.parse(
-        proc.stdout.toString()
-      ) as ButStatusJson;
-
-      let branchCount = 0;
-      for (const stack of data.stacks ?? []) {
-        for (const branch of stack.branches ?? []) {
-          const hasInBranch = branch.commits?.some(
-            (c: { changes?: ButStatusChange[] }) =>
-              c.changes?.some((ch) => ch.filePath === filePath)
-          );
-          if (hasInBranch) branchCount++;
-          if (branchCount > 1) return true;
-        }
-      }
-
-      return false;
-    } catch {
-      return false;
-    }
-  }
-
-  type FileLock = {
-    sessionID: string;
-    timestamp: number;
-  };
-
-  const fileLocks = new Map<string, FileLock>();
-  const LOCK_TIMEOUT_MS = 60_000;
-  const LOCK_POLL_MS = 1_000;
-  const STALE_LOCK_MS = 5 * 60_000;
-
   type BeforeHookInput = {
     tool?: string;
     sessionID?: string;
@@ -1072,19 +184,19 @@ export function createGitButlerPlugin(
   };
 
   function extractFilePathFromArgs(
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
   ): string | undefined {
     const raw =
       (args.filePath as string | undefined) ??
       (args.file_path as string | undefined) ??
       (args.path as string | undefined);
-    return raw ? toRelativePath(raw) : undefined;
+    return raw ? cli.toRelativePath(raw) : undefined;
   }
 
   return {
     "tool.execute.before": async (
       input: BeforeHookInput,
-      output: BeforeHookOutput
+      output: BeforeHookOutput,
     ) => {
       if (internalSessionIds.has(input.sessionID ?? ""))
         return;
@@ -1105,8 +217,18 @@ export function createGitButlerPlugin(
           log.warn("lock-stale", {
             file: filePath,
             owner: existing.sessionID,
+            ageMs: Date.now() - existing.timestamp,
+            ownerOperation: existing.operation,
           });
         } else if (existing.sessionID !== sessionID) {
+          log.info("lock-contention", {
+            file: filePath,
+            owner: existing.sessionID,
+            ownerOperation: existing.operation,
+            ownerAgeMs: Date.now() - existing.timestamp,
+            waiter: sessionID,
+            waiterOperation: input.tool,
+          });
           const deadline = Date.now() + LOCK_TIMEOUT_MS;
           while (Date.now() < deadline) {
             await Bun.sleep(LOCK_POLL_MS);
@@ -1128,37 +250,44 @@ export function createGitButlerPlugin(
             log.error("lock-timeout", {
               file: filePath,
               owner: stillLocked.sessionID,
+              ownerOperation: stillLocked.operation,
+              ownerAgeMs: Date.now() - stillLocked.timestamp,
               waiter: sessionID,
+              waiterOperation: input.tool,
             });
           }
         }
       }
 
+      const previousLock = fileLocks.get(filePath);
       fileLocks.set(filePath, {
         sessionID,
         timestamp: Date.now(),
+        operation: input.tool ?? "unknown",
       });
       log.info("lock-acquired", {
         file: filePath,
         session: sessionID,
+        operation: input.tool,
+        ...(previousLock ? { previousAgeMs: Date.now() - previousLock.timestamp } : {}),
       });
     },
 
     "tool.execute.after": async (
       input: HookInput,
-      output: HookOutput
+      output: HookOutput,
     ) => {
       if (internalSessionIds.has(input.sessionID ?? ""))
         return;
 
-      await trackSubagentMapping(input);
+      await state.trackSubagentMapping(input);
 
       if (input.tool !== "edit" && input.tool !== "write")
         return;
 
-      if (!isWorkspaceMode()) return;
+      if (!cli.isWorkspaceMode()) return;
 
-      const filePath = extractFilePath(output);
+      const filePath = cli.extractFilePath(output);
       if (!filePath) {
         // Release any locks held by this session to prevent leaks
         // when file path extraction from output fails
@@ -1178,22 +307,32 @@ export function createGitButlerPlugin(
         return;
       }
 
-      const relativePath = toRelativePath(filePath);
+      const relativePath = cli.toRelativePath(filePath);
       try {
-        const branchInfo = findFileBranch(relativePath);
-        if (branchInfo.inBranch) {
+        const cached = assignmentCache.get(relativePath);
+        const cacheHit = cached && Date.now() - cached.timestamp < ASSIGNMENT_CACHE_TTL_MS;
+
+        if (!cacheHit) {
+          const branchInfo = cli.findFileBranch(relativePath);
+          if (branchInfo.inBranch) {
           if (
             branchInfo.unassignedCliId &&
             branchInfo.branchCliId
           ) {
-            if (hasMultiBranchHunks(relativePath)) {
+            if (cli.hasMultiBranchHunks(relativePath)) {
               log.warn("rub-skip-multi-branch", {
                 file: relativePath,
               });
             } else {
-              const rubOk = butRub(
+              log.info("rub-check", {
+                file: relativePath,
+                multiBranch: false,
+                source: branchInfo.unassignedCliId,
+                dest: branchInfo.branchCliId,
+              });
+              const rubOk = cli.butRub(
                 branchInfo.unassignedCliId,
-                branchInfo.branchCliId
+                branchInfo.branchCliId,
               );
               if (rubOk) {
                 log.info("rub-ok", {
@@ -1212,10 +351,18 @@ export function createGitButlerPlugin(
           }
           return;
         }
+        } else {
+          log.info("assignment-cache-hit", {
+            file: relativePath,
+            branchCliId: cached.branchCliId,
+            ageMs: Date.now() - cached.timestamp,
+          });
+        }
 
-        const conversationId = await toUUID(
-          resolveSessionRoot(input.sessionID)
-        );
+        const branchSeed = config.branch_target ?? state.resolveSessionRoot(input.sessionID);
+        const conversationId = cacheHit
+          ? cached.conversationId
+          : await toUUID(branchSeed);
 
         log.info("after-edit", {
           file: relativePath,
@@ -1224,13 +371,19 @@ export function createGitButlerPlugin(
         });
 
         try {
-          await butCursor("after-edit", {
+          await cli.butCursor("after-edit", {
             conversation_id: conversationId,
             generation_id: crypto.randomUUID(),
             file_path: relativePath,
-            edits: extractEdits(output),
+            edits: cli.extractEdits(output),
             hook_event_name: "afterFileEdit",
             workspace_roots: [cwd],
+          });
+
+          assignmentCache.set(relativePath, {
+            branchCliId: conversationId,
+            conversationId,
+            timestamp: Date.now(),
           });
         } catch (err) {
           log.error("cursor-after-edit-error", {
@@ -1240,15 +393,41 @@ export function createGitButlerPlugin(
         }
 
         conversationsWithEdits.add(conversationId);
-        savePluginState(
+
+        if (!editedFilesPerConversation.has(conversationId)) {
+          editedFilesPerConversation.set(conversationId, new Set());
+        }
+        editedFilesPerConversation.get(conversationId)!.add(relativePath);
+
+        const rootSessionID = state.resolveSessionRoot(input.sessionID);
+        const existingOwner = branchOwnership.get(conversationId);
+        if (existingOwner && existingOwner.rootSessionID !== rootSessionID) {
+          log.error("branch-collision", {
+            conversationId,
+            existingOwner: existingOwner.rootSessionID,
+            newOwner: rootSessionID,
+            existingBranch: existingOwner.branchName,
+          });
+        } else if (!existingOwner) {
+          branchOwnership.set(conversationId, {
+            rootSessionID,
+            branchName: `conversation-${conversationId.slice(0, 8)}`,
+            firstSeen: Date.now(),
+          });
+        }
+
+        state.savePluginState(
           conversationsWithEdits,
-          rewordedBranches
+          rewordedBranches,
+          branchOwnership,
         ).catch(() => {});
       } finally {
+        const releasedLock = fileLocks.get(relativePath);
         fileLocks.delete(relativePath);
         log.info("lock-released", {
           file: relativePath,
           session: input.sessionID,
+          ...(releasedLock ? { heldMs: Date.now() - releasedLock.timestamp } : {}),
         });
       }
     },
@@ -1264,7 +443,7 @@ export function createGitButlerPlugin(
       )
         return;
 
-      await trackSessionCreatedMapping(event);
+      await state.trackSessionCreatedMapping(event);
 
       if (event.type === "session.created") {
         const crProps = event.properties as
@@ -1297,11 +476,10 @@ export function createGitButlerPlugin(
           props?.status?.type === "idle");
 
       if (!isIdle) return;
-      if (!isWorkspaceMode()) return;
+      if (!cli.isWorkspaceMode()) return;
 
-      const conversationId = await toUUID(
-        resolveSessionRoot(props?.sessionID)
-      );
+      const branchSeed = config.branch_target ?? state.resolveSessionRoot(props?.sessionID);
+      const conversationId = await toUUID(branchSeed);
 
       if (!conversationsWithEdits.has(conversationId))
         return;
@@ -1315,8 +493,9 @@ export function createGitButlerPlugin(
           conversationId,
         });
 
+        let stopFailed = false;
         try {
-          await butCursor("stop", {
+          await cli.butCursor("stop", {
             conversation_id: conversationId,
             generation_id: crypto.randomUUID(),
             status: "completed",
@@ -1324,13 +503,17 @@ export function createGitButlerPlugin(
             workspace_roots: [cwd],
           });
         } catch (err) {
+          stopFailed = true;
           log.error("cursor-stop-error", {
             conversationId,
             error: err instanceof Error ? err.message : String(err),
           });
         }
 
-        await postStopProcessing(props?.sessionID);
+        await reword.postStopProcessing(props?.sessionID, conversationId, stopFailed);
+
+        assignmentCache.clear();
+        cachedStatus = null;
       } finally {
         activeStopProcessing.delete(conversationId);
       }
@@ -1343,7 +526,7 @@ export function createGitButlerPlugin(
           info: Record<string, unknown>;
           parts: Array<Record<string, unknown>>;
         }>;
-      }
+      },
     ) => {
       const { messages } = output;
       if (messages.length === 0) return;
@@ -1363,11 +546,11 @@ export function createGitButlerPlugin(
       const sessionID = messageSessionID ?? mainSessionID;
       if (!sessionID) return;
 
-      const notification = consumeNotifications(sessionID);
+      const notification = notify.consumeNotifications(sessionID);
       if (!notification) return;
 
       const textPartIndex = lastUserMessage.parts.findIndex(
-        (p) => p.type === "text" && p.text
+        (p) => p.type === "text" && p.text,
       );
       if (textPartIndex === -1) return;
 
@@ -1383,13 +566,95 @@ export function createGitButlerPlugin(
       lastUserMessage.parts.splice(
         textPartIndex,
         0,
-        syntheticPart
+        syntheticPart,
       );
 
       log.info("context-injected", {
         sessionID,
         contentLength: notification.length,
       });
+    },
+
+    "experimental.session.compacting": async (
+      input: { sessionID: string },
+      output: { context: string[]; prompt?: string },
+    ) => {
+      try {
+        const rootSessionID = state.resolveSessionRoot(input.sessionID);
+        const conversationId = await toUUID(rootSessionID);
+
+        const contextParts: string[] = [];
+
+        const status = getCachedStatus();
+        if (status?.stacks) {
+          const stacks = status.stacks;
+          const activeBranches = stacks
+            .flatMap((s) => s.branches ?? [])
+            .filter((b) => b.commits.length > 0 || (stacks.find((s) => (s.branches ?? []).includes(b))?.assignedChanges?.length ?? 0) > 0);
+
+          if (activeBranches.length > 0) {
+            const branchList = activeBranches
+              .map((b) => `- \`${b.name}\` (${b.commits.length} commits)`)
+              .join("\n");
+            contextParts.push(`Active GitButler branches:\n${branchList}`);
+          }
+        }
+
+        if (rewordedBranches.size > 0) {
+          contextParts.push(`Reworded branches (commit messages updated): ${rewordedBranches.size} branches`);
+        }
+
+        if (conversationsWithEdits.has(conversationId)) {
+          contextParts.push(`This session has active edits tracked in GitButler (conversation: ${conversationId.slice(0, 8)})`);
+        }
+
+        const ownership = branchOwnership.get(conversationId);
+        if (ownership) {
+          contextParts.push(`Session branch ownership: root=${ownership.rootSessionID.slice(0, 8)}, branch=${ownership.branchName}`);
+        }
+
+        if (contextParts.length > 0) {
+          output.context.push(
+            "<gitbutler-state>\n" +
+            contextParts.join("\n\n") +
+            "\n</gitbutler-state>",
+          );
+          log.info("compacting-context-injected", {
+            sessionID: input.sessionID,
+            contextItems: contextParts.length,
+          });
+        }
+      } catch {
+        // Best-effort — never block compaction
+      }
+    },
+
+    "experimental.chat.system.transform": async (
+      _input: { sessionID?: string; model: Record<string, unknown> },
+      output: { system: string[] },
+    ) => {
+      if (!cli.isWorkspaceMode()) return;
+
+      try {
+        const status = getCachedStatus();
+        if (!status?.stacks) return;
+
+        const activeBranches = status.stacks
+          .flatMap((s) => s.branches ?? [])
+          .filter((b) => b.commits.length > 0);
+        const unassignedCount = status.unassignedChanges?.length ?? 0;
+
+        if (activeBranches.length === 0 && unassignedCount === 0) return;
+
+        const branchNames = activeBranches.map((b) => b.name).join(", ");
+        output.system.push(
+          `[GitButler] Workspace mode active. ` +
+          `${activeBranches.length} branch(es): ${branchNames}. ` +
+          `${unassignedCount} unassigned change(s).`,
+        );
+      } catch {
+        // Best-effort — never block LLM calls
+      }
     },
   };
   };

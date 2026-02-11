@@ -17,6 +17,14 @@ export type GitButlerPluginConfig = {
   auto_update: boolean;
   /** Regex pattern string for default branch names (will be compiled to RegExp) */
   default_branch_pattern: string;
+  /** Milliseconds before a file lock is considered stale */
+  stale_lock_ms: number;
+  /** Debounce window in ms for per-file edit hooks (0 to disable) */
+  edit_debounce_ms: number;
+  /** Run lightweight GC on session start (remove empty ge-branch-* branches) */
+  gc_on_session_start: boolean;
+  /** When set, all sessions use this value for conversation_id instead of rootSessionID */
+  branch_target?: string;
 };
 
 export const DEFAULT_CONFIG: Readonly<GitButlerPluginConfig> = {
@@ -28,6 +36,9 @@ export const DEFAULT_CONFIG: Readonly<GitButlerPluginConfig> = {
   branch_slug_max_length: 50,
   auto_update: true,
   default_branch_pattern: "^ge-branch-\\d+$",
+  stale_lock_ms: 300_000,
+  edit_debounce_ms: 200,
+  gc_on_session_start: false,
 };
 
 const CONFIG_FILE_NAME = ".opencode/gitbutler.json";
@@ -133,6 +144,18 @@ export async function loadConfig(
       default_branch_pattern: isValidRegex(parsed.default_branch_pattern)
         ? parsed.default_branch_pattern
         : DEFAULT_CONFIG.default_branch_pattern,
+      stale_lock_ms: typeof parsed.stale_lock_ms === "number" && parsed.stale_lock_ms > 0
+        ? parsed.stale_lock_ms
+        : DEFAULT_CONFIG.stale_lock_ms,
+      edit_debounce_ms: typeof parsed.edit_debounce_ms === "number" && parsed.edit_debounce_ms >= 0
+        ? parsed.edit_debounce_ms
+        : DEFAULT_CONFIG.edit_debounce_ms,
+      gc_on_session_start: typeof parsed.gc_on_session_start === "boolean"
+        ? parsed.gc_on_session_start
+        : DEFAULT_CONFIG.gc_on_session_start,
+      ...(typeof parsed.branch_target === "string" && parsed.branch_target.length > 0
+        ? { branch_target: parsed.branch_target }
+        : {}),
     };
   } catch (err) {
     console.warn(
