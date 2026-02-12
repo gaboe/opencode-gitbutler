@@ -23,7 +23,7 @@ import { createLogger } from "./logger.js";
 import { createCli } from "./cli.js";
 import type { HookOutput } from "./cli.js";
 import { createStateManager } from "./state.js";
-import type { HookInput, EventPayload, BranchOwnership } from "./state.js";
+import type { HookInput, HookOutput as StateHookOutput, EventPayload, BranchOwnership } from "./state.js";
 import { createNotificationManager } from "./notify.js";
 import { createRewordManager } from "./reword.js";
 
@@ -280,7 +280,7 @@ export function createGitButlerPlugin(
       if (internalSessionIds.has(input.sessionID ?? ""))
         return;
 
-      await state.trackSubagentMapping(input);
+      await state.trackSubagentMapping(input, output as StateHookOutput);
 
       if (input.tool !== "edit" && input.tool !== "write")
         return;

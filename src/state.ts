@@ -6,6 +6,12 @@ export type HookInput = {
   callID?: string;
 };
 
+export type HookOutput = {
+  title?: string;
+  output?: string;
+  metadata?: Record<string, unknown>;
+};
+
 export type EventPayload = Record<string, unknown> & {
   type?: string;
   properties?: Record<string, unknown>;
@@ -39,7 +45,7 @@ export type StateManager = {
   loadSessionMap: () => Promise<Map<string, string>>;
   saveSessionMap: (map: Map<string, string>) => Promise<void>;
   resolveSessionRoot: (sessionID: string | undefined) => string;
-  trackSubagentMapping: (input: HookInput) => Promise<void>;
+  trackSubagentMapping: (input: HookInput, output?: HookOutput) => Promise<void>;
   trackSessionCreatedMapping: (event: EventPayload) => Promise<void>;
   parentSessionByTaskSession: Map<string, string>;
 };
@@ -140,29 +146,57 @@ export function createStateManager(
 
   async function trackSubagentMapping(
     input: HookInput,
+    output?: HookOutput,
   ): Promise<void> {
     const tool = input.tool;
     const parentSessionID = input.sessionID;
-    const taskSessionID = input.callID;
+    const taskCallID = input.callID;
 
     if (!tool || !SUBAGENT_TOOLS.has(tool)) return;
-    if (!parentSessionID || !taskSessionID) return;
+    if (!parentSessionID) return;
 
-    parentSessionByTaskSession.set(
-      taskSessionID,
-      parentSessionID,
-    );
+    // Map callID → parentSessionID (tool call level)
+    if (taskCallID) {
+      parentSessionByTaskSession.set(
+        taskCallID,
+        parentSessionID,
+      );
+    }
+
+    // Map execution sessionId → parentSessionID (session level)
+    // OpenCode task tool returns metadata.sessionId with the actual
+    // execution session ID that will appear in subsequent hook calls
+    const metadata = output?.metadata;
+    const executionSessionId =
+      typeof metadata?.sessionId === "string"
+        ? metadata.sessionId
+        : typeof metadata?.session_id === "string"
+          ? metadata.session_id
+          : undefined;
+
+    if (executionSessionId && executionSessionId !== parentSessionID) {
+      parentSessionByTaskSession.set(
+        executionSessionId,
+        parentSessionID,
+      );
+      log.info("session-map-execution", {
+        executionSession: executionSessionId,
+        parent: parentSessionID,
+        callID: taskCallID,
+      });
+    }
+
     try {
       await saveSessionMap(parentSessionByTaskSession);
     } catch (err) {
       log.warn("session-map-save-failed", {
-        task: taskSessionID,
+        task: taskCallID,
         parent: parentSessionID,
         error: err instanceof Error ? err.message : String(err),
       });
     }
     log.info("session-map-subagent", {
-      task: taskSessionID,
+      task: taskCallID,
       parent: parentSessionID,
     });
   }
@@ -175,16 +209,23 @@ export function createStateManager(
     const properties = event.properties;
     if (!properties) return;
 
+    // OpenCode SDK: { properties: { info: { id, parentID } } }
+    const info = properties.info as
+      | { id?: string; parentID?: string }
+      | undefined;
+
     const sessionID =
-      typeof properties.id === "string"
+      (typeof info?.id === "string" ? info.id : undefined) ??
+      (typeof properties.id === "string"
         ? properties.id
-        : undefined;
+        : undefined);
     const parentSessionID =
-      typeof properties.parentSessionID === "string"
+      (typeof info?.parentID === "string" ? info.parentID : undefined) ??
+      (typeof properties.parentSessionID === "string"
         ? properties.parentSessionID
         : typeof properties.parent_session_id === "string"
           ? properties.parent_session_id
-          : undefined;
+          : undefined);
 
     if (!sessionID || !parentSessionID) return;
 
