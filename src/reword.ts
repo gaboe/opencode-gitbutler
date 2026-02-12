@@ -142,6 +142,18 @@ export type RewordManager = {
   postStopProcessing: (sessionID: string | undefined, conversationId: string, stopFailed?: boolean) => Promise<void>;
 };
 
+function classifyRewordFailure(stderr: string): string {
+  if (stderr.includes("locked") || stderr.includes("SQLITE_BUSY"))
+    return "locked";
+  if (stderr.includes("not found") || stderr.includes("Branch not found"))
+    return "not-found";
+  if (stderr.includes("reference mismatch") || stderr.includes("workspace reference"))
+    return "reference-mismatch";
+  if (stderr.includes("not in workspace mode") || stderr.includes("not initialized"))
+    return "not-workspace";
+  return "unknown";
+}
+
 export function createRewordManager(deps: RewordDeps): RewordManager {
   const {
     cwd,
@@ -420,12 +432,27 @@ export function createRewordManager(deps: RewordDeps): RewordManager {
             );
             const commitMsg =
               llmMessage ?? toCommitMessage(prompt);
-            const rewordOk = cli.butReword(commit.cliId, commitMsg);
-            if (!rewordOk) {
+
+            let rewordResult = cli.butReword(commit.cliId, commitMsg);
+
+            if (!rewordResult.ok) {
+              const isLocked = rewordResult.stderr.includes("locked") ||
+                rewordResult.stderr.includes("SQLITE_BUSY");
+
+              if (isLocked) {
+                await Bun.sleep(1000);
+                rewordResult = cli.butReword(commit.cliId, commitMsg);
+              }
+            }
+
+            if (!rewordResult.ok) {
+              const reason = classifyRewordFailure(rewordResult.stderr);
               log.warn("reword-failed", {
                 branch: branch.name,
                 commit: commit.cliId,
                 message: commitMsg,
+                reason,
+                stderr: rewordResult.stderr.slice(0, 300),
               });
               failCount++;
               continue;
@@ -454,8 +481,8 @@ export function createRewordManager(deps: RewordDeps): RewordManager {
 
           if (defaultBranchPattern.test(branch.name)) {
             latestBranchName = toBranchSlug(prompt, config.branch_slug_max_length);
-            const renameOk = cli.butReword(branch.cliId, latestBranchName);
-            if (renameOk) {
+            const renameResult = cli.butReword(branch.cliId, latestBranchName);
+            if (renameResult.ok) {
               log.info("branch-rename", {
                 status: "ok",
                 from: branch.name,
@@ -471,6 +498,8 @@ export function createRewordManager(deps: RewordDeps): RewordManager {
                 status: "failed",
                 from: branch.name,
                 to: latestBranchName,
+                reason: classifyRewordFailure(renameResult.stderr),
+                stderr: renameResult.stderr.slice(0, 300),
               });
               latestBranchName = branch.name;
               failCount++;

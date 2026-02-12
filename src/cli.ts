@@ -70,10 +70,10 @@ export type Cli = {
   isWorkspaceMode: () => boolean;
   findFileBranch: (filePath: string) => FileBranchResult;
   butRub: (source: string, dest: string) => boolean;
-  butUnapply: (branchCliId: string) => boolean;
+  butUnapply: (branchCliId: string) => { ok: boolean; stderr: string };
   butUnapplyWithRetry: (branchCliId: string, branchName: string, maxRetries?: number) => Promise<boolean>;
   getFullStatus: () => ButStatusFull | null;
-  butReword: (target: string, message: string) => boolean;
+  butReword: (target: string, message: string) => { ok: boolean; stderr: string };
   butCursor: (subcommand: string, payload: Record<string, unknown>) => Promise<void>;
   extractFilePath: (output: HookOutput) => string | undefined;
   extractEdits: (output: HookOutput) => Array<{ old_string: string; new_string: string }>;
@@ -177,38 +177,100 @@ export function createCli(cwd: string, log: Logger): Cli {
     }
   }
 
-  function butUnapply(branchCliId: string): boolean {
+  function butUnapply(branchCliId: string): { ok: boolean; stderr: string } {
     try {
       const proc = Bun.spawnSync(
         ["but", "unapply", branchCliId],
         { cwd, stdout: "pipe", stderr: "pipe" },
       );
-      return proc.exitCode === 0;
-    } catch {
-      return false;
+      return {
+        ok: proc.exitCode === 0,
+        stderr: proc.stderr?.toString().trim() ?? "",
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        stderr: err instanceof Error ? err.message : String(err),
+      };
     }
   }
 
   async function butUnapplyWithRetry(
     branchCliId: string,
     branchName: string,
-    maxRetries = 2,
+    maxRetries = 4,
   ): Promise<boolean> {
+    let lastStderr = "";
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      const ok = butUnapply(branchCliId);
-      if (ok) {
-        if (attempt > 0) {
-          log.info("cleanup-ok", { branch: branchName, retries: attempt });
+      if (attempt > 0) {
+        const status = getFullStatus();
+        if (status?.stacks) {
+          const branch = status.stacks
+            .flatMap((s) => s.branches ?? [])
+            .find((b) => b.cliId === branchCliId);
+          if (!branch) {
+            log.info("cleanup-ok", {
+              branch: branchName,
+              retries: attempt,
+              reason: "branch-gone",
+            });
+            return true;
+          }
+          if (branch.commits.length > 0) {
+            log.info("cleanup-skipped", {
+              branch: branchName,
+              retries: attempt,
+              reason: "branch-has-commits",
+              commitCount: branch.commits.length,
+            });
+            return true;
+          }
         }
+      }
+
+      const result = butUnapply(branchCliId);
+      if (result.ok) {
+        log.info("cleanup-ok", {
+          branch: branchName,
+          ...(attempt > 0 ? { retries: attempt } : {}),
+        });
         return true;
       }
+
+      lastStderr = result.stderr;
+      const isLocked = lastStderr.includes("locked") ||
+        lastStderr.includes("SQLITE_BUSY") ||
+        lastStderr.includes("database is locked");
+      const isNotFound = lastStderr.includes("not found") ||
+        lastStderr.includes("Branch not found");
+
+      if (isNotFound) {
+        log.info("cleanup-ok", {
+          branch: branchName,
+          retries: attempt,
+          reason: "not-found",
+        });
+        return true;
+      }
+
       if (attempt < maxRetries) {
-        const delay = 500 * 2 ** attempt; // 500ms, 1000ms
-        log.info("cleanup-retry", { branch: branchName, attempt: attempt + 1 });
+        const delay = 500 * 2 ** attempt;
+        log.info("cleanup-retry", {
+          branch: branchName,
+          attempt: attempt + 1,
+          delayMs: delay,
+          reason: isLocked ? "locked" : "unknown",
+          stderr: lastStderr.slice(0, 200),
+        });
         await Bun.sleep(delay);
       }
     }
-    log.error("cleanup-failed", { branch: branchName, attempts: maxRetries + 1 });
+    log.error("cleanup-failed", {
+      branch: branchName,
+      attempts: maxRetries + 1,
+      stderr: lastStderr.slice(0, 500),
+      reason: lastStderr.includes("locked") ? "locked" : "unknown",
+    });
     return false;
   }
 
@@ -230,15 +292,21 @@ export function createCli(cwd: string, log: Logger): Cli {
   function butReword(
     target: string,
     message: string,
-  ): boolean {
+  ): { ok: boolean; stderr: string } {
     try {
       const proc = Bun.spawnSync(
         ["but", "reword", target, "-m", message],
         { cwd, stdout: "pipe", stderr: "pipe" },
       );
-      return proc.exitCode === 0;
-    } catch {
-      return false;
+      return {
+        ok: proc.exitCode === 0,
+        stderr: proc.stderr?.toString().trim() ?? "",
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        stderr: err instanceof Error ? err.message : String(err),
+      };
     }
   }
 

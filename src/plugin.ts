@@ -292,18 +292,21 @@ export function createGitButlerPlugin(
         // Release any locks held by this session to prevent leaks
         // when file path extraction from output fails
         const sessionID = input.sessionID ?? "unknown";
+        let releasedCount = 0;
         for (const [
           lockedPath,
           lock,
         ] of fileLocks.entries()) {
           if (lock.sessionID === sessionID) {
             fileLocks.delete(lockedPath);
-            log.warn("lock-released-fallback", {
-              file: lockedPath,
-              session: sessionID,
-            });
+            releasedCount++;
           }
         }
+        log.info("after-edit-no-filepath", {
+          sessionID,
+          tool: input.tool,
+          locksReleased: releasedCount,
+        });
         return;
       }
 
@@ -315,42 +318,48 @@ export function createGitButlerPlugin(
         if (!cacheHit) {
           const branchInfo = cli.findFileBranch(relativePath);
           if (branchInfo.inBranch) {
-          if (
-            branchInfo.unassignedCliId &&
-            branchInfo.branchCliId
-          ) {
-            if (cli.hasMultiBranchHunks(relativePath)) {
-              log.warn("rub-skip-multi-branch", {
-                file: relativePath,
-              });
-            } else {
-              log.info("rub-check", {
-                file: relativePath,
-                multiBranch: false,
-                source: branchInfo.unassignedCliId,
-                dest: branchInfo.branchCliId,
-              });
-              const rubOk = cli.butRub(
-                branchInfo.unassignedCliId,
-                branchInfo.branchCliId,
-              );
-              if (rubOk) {
-                log.info("rub-ok", {
-                  source: branchInfo.unassignedCliId,
-                  dest: branchInfo.branchCliId,
+            if (
+              branchInfo.unassignedCliId &&
+              branchInfo.branchCliId
+            ) {
+              if (cli.hasMultiBranchHunks(relativePath)) {
+                log.warn("rub-skip-multi-branch", {
                   file: relativePath,
                 });
               } else {
-                log.error("rub-failed", {
+                log.info("rub-check", {
+                  file: relativePath,
+                  multiBranch: false,
                   source: branchInfo.unassignedCliId,
                   dest: branchInfo.branchCliId,
-                  file: relativePath,
                 });
+                const rubOk = cli.butRub(
+                  branchInfo.unassignedCliId,
+                  branchInfo.branchCliId,
+                );
+                if (rubOk) {
+                  log.info("rub-ok", {
+                    source: branchInfo.unassignedCliId,
+                    dest: branchInfo.branchCliId,
+                    file: relativePath,
+                  });
+                } else {
+                  log.error("rub-failed", {
+                    source: branchInfo.unassignedCliId,
+                    dest: branchInfo.branchCliId,
+                    file: relativePath,
+                  });
+                }
               }
+            } else {
+              log.info("after-edit-already-assigned", {
+                file: relativePath,
+                sessionID: input.sessionID,
+                branch: branchInfo.branchName,
+              });
             }
+            return;
           }
-          return;
-        }
         } else {
           log.info("assignment-cache-hit", {
             file: relativePath,
