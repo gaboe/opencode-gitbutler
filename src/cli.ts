@@ -37,6 +37,7 @@ export type ButStatusBranch = {
     cliId: string;
     commitId: string;
     message: string;
+    changes?: ButStatusChange[];
   }>;
 };
 
@@ -68,7 +69,7 @@ export type HookOutput = {
 
 export type Cli = {
   isWorkspaceMode: () => boolean;
-  findFileBranch: (filePath: string) => FileBranchResult;
+  findFileBranch: (filePath: string, statusData?: ButStatusFull | null) => FileBranchResult;
   butRub: (source: string, dest: string) => boolean;
   butUnapply: (branchCliId: string) => { ok: boolean; stderr: string };
   butUnapplyWithRetry: (branchCliId: string, branchName: string, maxRetries?: number) => Promise<boolean>;
@@ -77,7 +78,7 @@ export type Cli = {
   butCursor: (subcommand: string, payload: Record<string, unknown>) => Promise<void>;
   extractFilePath: (output: HookOutput) => string | undefined;
   extractEdits: (output: HookOutput) => Array<{ old_string: string; new_string: string }>;
-  hasMultiBranchHunks: (filePath: string) => boolean;
+  hasMultiBranchHunks: (filePath: string, statusData?: ButStatusFull | null) => boolean;
   toRelativePath: (absPath: string) => string;
 };
 
@@ -114,17 +115,20 @@ export function createCli(cwd: string, log: Logger): Cli {
 
   function findFileBranch(
     filePath: string,
+    statusData?: ButStatusFull | null,
   ): FileBranchResult {
     try {
-      const proc = Bun.spawnSync(
-        ["but", "status", "--json", "-f"],
-        { cwd, stdout: "pipe", stderr: "pipe" },
-      );
-      if (proc.exitCode !== 0) return { inBranch: false };
-
-      const data = JSON.parse(
-        proc.stdout.toString(),
-      ) as ButStatusJson;
+      let data: ButStatusFull;
+      if (statusData) {
+        data = statusData;
+      } else {
+        const proc = Bun.spawnSync(
+          ["but", "status", "--json", "-f"],
+          { cwd, stdout: "pipe", stderr: "pipe" },
+        );
+        if (proc.exitCode !== 0) return { inBranch: false };
+        data = JSON.parse(proc.stdout.toString()) as ButStatusFull;
+      }
 
       const normalized = toRelativePath(filePath);
 
@@ -412,24 +416,28 @@ export function createCli(cwd: string, log: Logger): Cli {
     return [];
   }
 
-  function hasMultiBranchHunks(filePath: string): boolean {
+  function hasMultiBranchHunks(
+    filePath: string,
+    statusData?: ButStatusFull | null,
+  ): boolean {
     try {
-      const proc = Bun.spawnSync(
-        ["but", "status", "--json", "-f"],
-        { cwd, stdout: "pipe", stderr: "pipe" },
-      );
-      if (proc.exitCode !== 0) return false;
-
-      const data = JSON.parse(
-        proc.stdout.toString(),
-      ) as ButStatusJson;
+      let data: ButStatusFull;
+      if (statusData) {
+        data = statusData;
+      } else {
+        const proc = Bun.spawnSync(
+          ["but", "status", "--json", "-f"],
+          { cwd, stdout: "pipe", stderr: "pipe" },
+        );
+        if (proc.exitCode !== 0) return false;
+        data = JSON.parse(proc.stdout.toString()) as ButStatusFull;
+      }
 
       let branchCount = 0;
       for (const stack of data.stacks ?? []) {
         for (const branch of stack.branches ?? []) {
           const hasInBranch = branch.commits?.some(
-            (c: { changes?: ButStatusChange[] }) =>
-              c.changes?.some((ch) => ch.filePath === filePath),
+            (c) => c.changes?.some((ch) => ch.filePath === filePath),
           );
           if (hasInBranch) branchCount++;
           if (branchCount > 1) return true;

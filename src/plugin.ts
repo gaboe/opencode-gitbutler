@@ -77,7 +77,7 @@ export function createGitButlerPlugin(
   // Main session tracking for context injection fallback
   let mainSessionID: string | undefined;
 
-  const notify = createNotificationManager(log, state.resolveSessionRoot);
+  const notify = createNotificationManager(log, state.resolveSessionRoot, config.notification_max_age_ms);
 
   let DEFAULT_BRANCH_PATTERN: RegExp;
   try {
@@ -316,13 +316,14 @@ export function createGitButlerPlugin(
         const cacheHit = cached && Date.now() - cached.timestamp < ASSIGNMENT_CACHE_TTL_MS;
 
         if (!cacheHit) {
-          const branchInfo = cli.findFileBranch(relativePath);
+          const statusSnapshot = cli.getFullStatus();
+          const branchInfo = cli.findFileBranch(relativePath, statusSnapshot);
           if (branchInfo.inBranch) {
             if (
               branchInfo.unassignedCliId &&
               branchInfo.branchCliId
             ) {
-              if (cli.hasMultiBranchHunks(relativePath)) {
+              if (cli.hasMultiBranchHunks(relativePath, statusSnapshot)) {
                 log.warn("rub-skip-multi-branch", {
                   file: relativePath,
                 });

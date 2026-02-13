@@ -23,6 +23,8 @@ export type GitButlerPluginConfig = {
   edit_debounce_ms: number;
   /** Run lightweight GC on session start (remove empty ge-branch-* branches) */
   gc_on_session_start: boolean;
+  /** Max age in ms for pending notifications before they are considered expired (0 to disable) */
+  notification_max_age_ms: number;
   /** When set, all sessions use this value for conversation_id instead of rootSessionID */
   branch_target?: string;
 };
@@ -39,6 +41,7 @@ export const DEFAULT_CONFIG: Readonly<GitButlerPluginConfig> = {
   stale_lock_ms: 300_000,
   edit_debounce_ms: 200,
   gc_on_session_start: false,
+  notification_max_age_ms: 300_000,
 };
 
 const CONFIG_FILE_NAME = ".opencode/gitbutler.json";
@@ -153,6 +156,9 @@ export async function loadConfig(
       gc_on_session_start: typeof parsed.gc_on_session_start === "boolean"
         ? parsed.gc_on_session_start
         : DEFAULT_CONFIG.gc_on_session_start,
+      notification_max_age_ms: typeof parsed.notification_max_age_ms === "number" && parsed.notification_max_age_ms >= 0
+        ? parsed.notification_max_age_ms
+        : DEFAULT_CONFIG.notification_max_age_ms,
       ...(typeof parsed.branch_target === "string" && parsed.branch_target.length > 0
         ? { branch_target: parsed.branch_target }
         : {}),

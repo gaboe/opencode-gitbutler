@@ -142,7 +142,7 @@ export type RewordManager = {
   postStopProcessing: (sessionID: string | undefined, conversationId: string, stopFailed?: boolean) => Promise<void>;
 };
 
-function classifyRewordFailure(stderr: string): string {
+export function classifyRewordFailure(stderr: string): string {
   if (stderr.includes("locked") || stderr.includes("SQLITE_BUSY"))
     return "locked";
   if (stderr.includes("not found") || stderr.includes("Branch not found"))
