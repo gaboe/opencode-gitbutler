@@ -5,8 +5,17 @@
   "description": "OpenCode plugin for GitButler integration",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target bun --format esm && tsc --emitDeclarationOnly",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bun run clean && bun run build",
     "postinstall": "node postinstall.mjs",
     "test": "bun test"
   },
@@ -16,6 +25,24 @@
     "skill",
     "command"
   ],
+  "keywords": [
+    "opencode",
+    "plugin",
+    "gitbutler",
+    "git",
+    "branches",
+    "ai"
+  ],
+  "author": "gaboe",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gaboe/opencode-gitbutler.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gaboe/opencode-gitbutler/issues"
+  },
+  "homepage": "https://github.com/gaboe/opencode-gitbutler#readme",
   "dependencies": {
     "@opencode-ai/plugin": "^1.1.0"
   },

@@ -1,0 +1,151 @@
+name: Publish
+
+run-name: "release ${{ inputs.version || inputs.bump }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Bump major, minor, or patch"
+        required: true
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+      version:
+        description: "Override version (e.g. 0.2.0). Takes precedence over bump."
+        required: false
+        type: string
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - run: bun test
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - run: bun run typecheck
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: [test, typecheck]
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: git fetch --force --tags
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - run: bun install
+
+      - name: Calculate version
+        id: version
+        run: |
+          VERSION="${{ inputs.version }}"
+          if [ -z "$VERSION" ]; then
+            PREV=$(curl -s https://registry.npmjs.org/opencode-gitbutler/latest \
+                   | jq -r '.version // "0.0.0"')
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$PREV"
+            case "${{ inputs.bump }}" in
+              major) VERSION="$((MAJOR+1)).0.0" ;;
+              minor) VERSION="${MAJOR}.$((MINOR+1)).0" ;;
+              *)     VERSION="${MAJOR}.${MINOR}.$((PATCH+1))" ;;
+            esac
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Publishing version: $VERSION"
+
+      - name: Check if already published
+        id: check
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://registry.npmjs.org/opencode-gitbutler/${{ steps.version.outputs.version }}")
+          if [ "$STATUS" = "200" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "opencode-gitbutler@${{ steps.version.outputs.version }} already published — skipping"
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update version in package.json
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          jq --arg v "${{ steps.version.outputs.version }}" \
+            '.version = $v' package.json > tmp.json && mv tmp.json package.json
+
+      - name: Build
+        if: steps.check.outputs.skip != 'true'
+        run: bun run clean && bun run build
+
+      - name: Publish to npm
+        if: steps.check.outputs.skip != 'true'
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: true
+
+      - name: Git commit, tag, and push
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json
+          git diff --cached --quiet || git commit -m "release: v${VERSION}"
+          git tag -f "v${VERSION}"
+          git push origin HEAD --tags
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release:
+    runs-on: ubuntu-latest
+    needs: publish
+    if: needs.publish.outputs.version != ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: git fetch --force --tags
+
+      - name: Create GitHub Release
+        run: |
+          VERSION="${{ needs.publish.outputs.version }}"
+          PREV_TAG=$(git tag --sort=-v:refname | grep -v "v${VERSION}" | head -1)
+          if [ -n "$PREV_TAG" ]; then
+            NOTES=$(git log "${PREV_TAG}..v${VERSION}" --oneline --format="- %s" 2>/dev/null || echo "Initial release")
+          else
+            NOTES="Initial release"
+          fi
+          gh release create "v${VERSION}" --title "v${VERSION}" \
+            --notes "$NOTES" 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

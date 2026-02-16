@@ -1,5 +1,7 @@
 # opencode-gitbutler
 
+[![npm version](https://img.shields.io/npm/v/opencode-gitbutler)](https://www.npmjs.com/package/opencode-gitbutler)
+
 OpenCode plugin for seamless GitButler integration. Automatically manages branches, generates commit messages via LLM, and provides real-time workspace state notifications.
 
 ## Installation
