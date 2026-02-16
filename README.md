@@ -13,7 +13,7 @@ This plugin bridges the gap by bringing GitButler's virtual branch power directl
 ### What This Plugin Does Differently
 
 - Only tool that combines automatic branch creation, LLM commits, file assignment, and context injection.
-- Zero-config setup. Just run `bun add` and add it to your plugins.
+- Zero-config setup. Just add it to your plugins and go.
 - Works with GitButler virtual branches to avoid worktree overhead.
 - Impersonates Cursor for full GitButler CLI compatibility.
 - Unique multi-agent session mapping.
@@ -21,37 +21,29 @@ This plugin bridges the gap by bringing GitButler's virtual branch power directl
 
 ## Installation
 
-Install the package from npm:
+### 1. Add plugin to OpenCode config
+
+Add to your `opencode.json` (global or project-level):
+
+```json
+{
+  "plugin": [
+    "opencode-gitbutler@latest"
+  ]
+}
+```
+
+OpenCode will install the plugin automatically on next launch.
+
+### 2. Install GitButler CLI
 
 ```bash
-bun add opencode-gitbutler
+brew install gitbutler
 ```
 
-Or add it to your plugins array in `.opencode/config.json`:
+See [GitButler installation docs](https://docs.gitbutler.com/installation) for other methods.
 
-```json
-{
-  "plugins": ["opencode-gitbutler"]
-}
-```
-
-## Prerequisites
-
-- **GitButler CLI** (`but`) — [Install via Homebrew](https://docs.gitbutler.com/installation)
-- **OpenCode** — v1.1.0 or later
-- **Bun** — v1.0.0 or later (plugin runtime)
-
-The postinstall script checks for the GitButler CLI and warns if missing (install never fails).
-
-## Quick Start
-
-Add to your OpenCode config (`.opencode/config.json`):
-
-```json
-{
-  "plugins": ["opencode-gitbutler"]
-}
-```
+### 3. Restart OpenCode
 
 The plugin automatically:
 - Creates and renames branches based on your prompts
