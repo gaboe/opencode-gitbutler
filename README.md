@@ -10,18 +10,6 @@ AI agents generate code at a pace that manual version control can't match. Witho
 
 This plugin bridges the gap by bringing GitButler's virtual branch power directly into your OpenCode agent sessions.
 
-### Comparison Table
-
-| Tool | Auto Branch Creation | LLM Commit Messages | File-to-Branch Assignment | Agent Context Injection | Zero Config |
-|------|---------------------|--------------------|--------------------------|-----------------------|-------------|
-| **opencode-gitbutler** | Yes | Yes (Claude Haiku) | Yes (`but rub`) | Yes (SKILL.md) | Yes |
-| GitButler Native Hooks | No | No | No | No | No (manual hook setup) |
-| GitButler MCP Server | No (agent must call tools) | No | No | No | No (MCP config) |
-| GitButler Code Agent | Yes (GUI only) | No | Yes (GUI) | No | No (requires Desktop app) |
-| oh-my-opencode | No | No | No | No | N/A (different purpose) |
-| GitKraken AI | No | Yes | No | No | No (commercial GUI) |
-| Manual git workflow | No | No | No | No | N/A |
-
 ### What This Plugin Does Differently
 
 - Only tool that combines automatic branch creation, LLM commits, file assignment, and context injection.
