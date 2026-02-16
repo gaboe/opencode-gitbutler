@@ -2,12 +2,49 @@
 
 [![npm version](https://img.shields.io/npm/v/opencode-gitbutler)](https://www.npmjs.com/package/opencode-gitbutler)
 
-OpenCode plugin for seamless GitButler integration. Automatically manages branches, generates commit messages via LLM, and provides real-time workspace state notifications.
+Stop managing git branches manually and let your AI agents do the heavy lifting with GitButler.
+
+## Why This Plugin?
+
+AI agents generate code at a pace that manual version control can't match. Without automation, you end up with massive commits, messy branch organization, and generic messages that make code review a nightmare.
+
+This plugin bridges the gap by bringing GitButler's virtual branch power directly into your OpenCode agent sessions.
+
+### Comparison Table
+
+| Tool | Auto Branch Creation | LLM Commit Messages | File-to-Branch Assignment | Agent Context Injection | Zero Config |
+|------|---------------------|--------------------|--------------------------|-----------------------|-------------|
+| **opencode-gitbutler** | Yes | Yes (Claude Haiku) | Yes (`but rub`) | Yes (SKILL.md) | Yes |
+| GitButler Native Hooks | No | No | No | No | No (manual hook setup) |
+| GitButler MCP Server | No (agent must call tools) | No | No | No | No (MCP config) |
+| GitButler Code Agent | Yes (GUI only) | No | Yes (GUI) | No | No (requires Desktop app) |
+| oh-my-opencode | No | No | No | No | N/A (different purpose) |
+| GitKraken AI | No | Yes | No | No | No (commercial GUI) |
+| Manual git workflow | No | No | No | No | N/A |
+
+### What This Plugin Does Differently
+
+- Only tool that combines automatic branch creation, LLM commits, file assignment, and context injection.
+- Zero-config setup. Just run `bun add` and add it to your plugins.
+- Works with GitButler virtual branches to avoid worktree overhead.
+- Impersonates Cursor for full GitButler CLI compatibility.
+- Unique multi-agent session mapping.
+- Hunk-level rub guard to skip multi-stack files.
 
 ## Installation
 
+Install the package from npm:
+
 ```bash
 bun add opencode-gitbutler
+```
+
+Or add it to your plugins array in `.opencode/config.json`:
+
+```json
+{
+  "plugins": ["opencode-gitbutler"]
+}
 ```
 
 ## Prerequisites
