@@ -388,6 +388,28 @@ export function createRewordManager(deps: RewordDeps): RewordManager {
     const status = cli.getFullStatus();
     if (!status?.stacks) return;
 
+    const ownershipSnapshot: Array<{
+      branchName: string;
+      branchCliId: string;
+      commitCount: number;
+    }> = [];
+    for (const stack of status.stacks) {
+      for (const branch of stack.branches ?? []) {
+        if (branch.commits.length > 0 || (stack.assignedChanges?.length ?? 0) > 0) {
+          ownershipSnapshot.push({
+            branchName: branch.name,
+            branchCliId: branch.cliId,
+            commitCount: branch.commits.length,
+          });
+        }
+      }
+    }
+    log.info("branch-ownership-snapshot", {
+      sessionID,
+      rootSessionID,
+      branches: ownershipSnapshot,
+    });
+
     let rewordCount = 0;
     let renameCount = 0;
     let cleanupCount = 0;

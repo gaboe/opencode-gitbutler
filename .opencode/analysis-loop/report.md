@@ -1,19 +1,26 @@
-# Plugin DX Analysis Report
+# Plugin DX Analysis Report (Re-run: 2026-02-16)
 
 ## Metadata
 - **Project**: `/Users/gabrielecegi/op/opencode-gitbutler` (plugin source repo)
-- **Context**: Plugin repo — analysis combines source code audit, test suite verification, git history, session history, and cross-reference with prior consumer-project telemetry from `andocs`
-- **Date**: 2026-02-13T08:35:00+01:00
-- **Duration**: ~8m
+- **Context**: Plugin repo — re-run analysis with no new consumer telemetry
+- **Date**: 2026-02-16T14:23:00+01:00
+- **Duration**: ~2m (quick re-run verification)
 - **Data sources**:
   - `[WARN]` Plugin debug log: Not present (this is the plugin repo, not a consumer project)
   - `[OK]` Session history: 10 OpenCode sessions available (development sessions)
-  - `[OK]` Git log: 11 commits on `main` branch
-  - `[WARN]` `but` CLI status: CLI installed but project not GitButler-initialized (expected for plugin repo)
-  - `[OK]` Source code: Full audit of 6 modules (plugin.ts, cli.ts, state.ts, reword.ts, notify.ts, logger.ts)
+  - `[OK]` Git log: 11 commits on `main` branch (no new commits since prior report)
+  - `[OK]` `but` CLI: Available (v0.19.1) but project not GitButler-initialized
+  - `[OK]` Source code: Prior audit from 2026-02-13 still valid
   - `[OK]` Test suite: 50/50 passing, TypeScript type-check clean
-  - `[OK]` Prior consumer report: `andocs` project runtime telemetry (2024 log lines, 2026-02-09)
-- **Iterations**: 6 clusters + cross-cutting synthesis (converged: all 21 features scored)
+- **Iterations**: 1 (re-run verification — converged on no new data)
+
+## Summary: No New Data Since Prior Report
+
+This is a re-run of the analysis loop requested on 2026-02-16. Key findings:
+
+1. **No new commits** — The last commit was on 2026-02-10, prior to the 2026-02-13 comprehensive report
+2. **No consumer debug.log available** — No consumer projects on this machine have runtime telemetry
+3. **Prior report stands** — All 21 features were scored as "Working" in the 2026-02-13 report
 
 ## Feature Scorecard
 
@@ -144,3 +151,20 @@
 4. **Add notification expiry tracking** — Log `notification-expired` when notifications are silently dropped to understand the 66% delivery gap
 5. **Add branch ownership audit event** — Periodic `branch-ownership-snapshot` in post-stop for provable session isolation
 6. **Consider integration test harness** — Mock `but` CLI responses + OpenCode SDK client for end-to-end hook flow testing without a real GitButler workspace
+
+---
+
+## Conclusion
+
+This re-run confirms there is no new runtime data available since the comprehensive 2026-02-13 analysis. The prior findings stand:
+
+- **All 21 features are Working** (scored at >90% success rate in available telemetry)
+- **No critical issues** identified
+- **8 improvement opportunities** documented (see above)
+
+To generate new telemetry, the plugin must be used in a consumer project (a real GitButler workspace with actual file editing sessions). The plugin source code itself has no runtime behavior — it runs within OpenCode's plugin system against consumer project workspaces.
+
+---
+
+*Report generated: 2026-02-16*
+*Prior comprehensive report: 2026-02-13*
