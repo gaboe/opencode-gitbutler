@@ -11,8 +11,11 @@
       "import": "./dist/index.js"
     }
   },
+  "bin": {
+    "opencode-gitbutler": "dist/cmd.js"
+  },
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target bun --format esm && tsc --emitDeclarationOnly",
+    "build": "bun build src/index.ts --outdir dist --target bun --format esm && bun build src/cmd.ts --outfile dist/cmd.js --target bun --format esm && tsc --emitDeclarationOnly",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bun run clean && bun run build",
@@ -44,7 +47,10 @@
   },
   "homepage": "https://github.com/gaboe/opencode-gitbutler#readme",
   "dependencies": {
-    "@opencode-ai/plugin": "^1.1.0"
+    "@effect/cli": "0.67.1",
+    "@effect/platform-node": "0.88.1",
+    "@opencode-ai/plugin": "^1.1.0",
+    "effect": "3.19.18"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.1.0"
