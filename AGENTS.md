@@ -65,6 +65,26 @@ bun test --grep "stripJsonComments"
 
 The build produces `dist/index.js` (ESM) and `dist/index.d.ts` (declarations).
 
+## Release & Publish
+
+Publishing is automated via GitHub Actions (`.github/workflows/publish.yml`). **Do NOT run `npm publish` locally.**
+
+```bash
+# 1. Bump version
+npm version patch --no-git-tag-version   # or minor/major
+
+# 2. Commit and push
+git add package.json
+git commit -m "chore: bump to $(jq -r .version package.json)"
+git push origin main
+
+# 3. Create and push tag — this triggers the publish workflow
+git tag "v$(jq -r .version package.json)"
+git push origin "v$(jq -r .version package.json)"
+```
+
+The workflow runs test → typecheck → build → `npm publish` (via OIDC, no token needed) → GitHub Release with auto-changelog.
+
 ## Project Structure
 
 ```

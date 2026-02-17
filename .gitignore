@@ -25,3 +25,4 @@ npm-debug.log*
 
 # opensrc - source code for packages
 opensrc/
+.opencode/plugin/session-map.json
