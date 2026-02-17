@@ -416,8 +416,59 @@ export function createRewordManager(deps: RewordDeps): RewordManager {
     let failCount = 0;
     let latestBranchName: string | null = null;
 
+    const owner = branchOwnership.get(conversationId);
+    const ownershipMatches =
+      !owner || owner.rootSessionID === rootSessionID;
+    if (!ownershipMatches && owner) {
+      log.warn("branch-ownership-mismatch", {
+        conversationId,
+        expectedRootSessionID: owner.rootSessionID,
+        actualRootSessionID: rootSessionID,
+      });
+    }
+
+    const candidateBranchCliIds = new Set<string>();
+    if (ownershipMatches && editedFiles && editedFiles.size > 0) {
+      for (const filePath of editedFiles) {
+        const branchInfo = cli.findFileBranch(filePath, status);
+        if (branchInfo.branchCliId) {
+          candidateBranchCliIds.add(branchInfo.branchCliId);
+        }
+      }
+    }
+
+    if (
+      ownershipMatches &&
+      owner?.branchName &&
+      !owner.branchName.startsWith("conversation-")
+    ) {
+      for (const stack of status.stacks) {
+        for (const branch of stack.branches ?? []) {
+          if (branch.name === owner.branchName) {
+            candidateBranchCliIds.add(branch.cliId);
+          }
+        }
+      }
+    }
+
+    const candidateBranches = status.stacks
+      .flatMap((stack) => stack.branches ?? [])
+      .filter((branch) =>
+        candidateBranchCliIds.has(branch.cliId)
+      );
+
+    if (candidateBranches.length === 0) {
+      log.info("post-stop-no-candidate-branches", {
+        conversationId,
+        rootSessionID,
+        editedFiles: editedFiles?.size ?? 0,
+        ownerBranchName: owner?.branchName,
+      });
+    }
+
     for (const stack of status.stacks) {
       for (const branch of stack.branches ?? []) {
+        if (!candidateBranchCliIds.has(branch.cliId)) continue;
         if (branch.branchStatus !== "completelyUnpushed")
           continue;
         if (branch.commits.length === 0) continue;
@@ -543,31 +594,33 @@ export function createRewordManager(deps: RewordDeps): RewordManager {
       }
     }
 
-    if (!latestBranchName) {
-      const existing = status.stacks
-        .flatMap((s) => s.branches ?? [])
-        .filter(
-          (b) =>
-            b.commits.length > 0 &&
-            !defaultBranchPattern.test(b.name),
-        );
-      if (existing.length > 0) {
-        latestBranchName =
-          existing[existing.length - 1]!.name;
-      }
+    const shouldSetTitle = candidateBranches.length === 1;
+    if (!shouldSetTitle && candidateBranches.length > 1) {
+      log.info("session-title-skipped-ambiguous", {
+        conversationId,
+        rootSessionID,
+        candidateBranches: candidateBranches.map((b) => ({
+          cliId: b.cliId,
+          name: b.name,
+        })),
+      });
     }
 
-    if (latestBranchName) {
-      client.session
-        .update({
-          path: { id: rootSessionID },
-          body: { title: latestBranchName },
-        })
-        .catch(() => {});
-      addNotification(
-        sessionID,
-        `Session title updated to \`${latestBranchName}\``,
-      );
+    if (shouldSetTitle) {
+      const singleBranch = candidateBranches[0]!;
+      const titleToSet = latestBranchName ?? singleBranch.name;
+      if (titleToSet) {
+        client.session
+          .update({
+            path: { id: rootSessionID },
+            body: { title: titleToSet },
+          })
+          .catch(() => {});
+        addNotification(
+          sessionID,
+          `Session title updated to \`${titleToSet}\``,
+        );
+      }
     }
 
     for (const stack of status.stacks) {
