@@ -60,6 +60,9 @@ You can batch multiple file edits before committing - no need to commit after ev
    - After edits, run `but status --json` and move your file/hunk IDs to the correct branch via `but stage` or `but commit --changes`.
 3. **Validate branch ownership before commit.**
    - Confirm each changed file/hunk belongs to the intended branch/task, then commit only those IDs.
+4. **Respect branch ownership across sessions.**
+   - In multi-agent environments, branches may belong to other agent sessions. Never reword, rename, or push branches you didn't create in this session.
+   - If you need to modify another session's branch, ask the user first.
 
 ## Quick Start
 
@@ -257,6 +260,34 @@ but absorb                                         # Absorb any auto-formatted c
 | Lefthook `pre-commit.old` accumulates | Lefthook creates `pre-commit.old` backup that conflicts on next install | Add `rm -f .git/hooks/pre-commit.old` to `prepare` script in package.json |
 | `but pull` before unapply | Pulling with merged branches still applied causes orphan errors | **Always** `but unapply <merged-branch>` before `but pull` |
 | `but unapply` after remote branch deletion | `but unapply` fails with "branch not found" when remote deleted the branch (e.g. `--delete-branch` on merge), and subsequent `but pull` fails with "resolution mismatch" | Use GitButler desktop app to pull, or `but teardown` → `but setup` → `but config target origin/<branch>` |
+| Split-hunk files stuck in `zz` | File has hunks locked to commits on different branches — GitButler sets `stack_id=None`, plugin considers file "handled" via lock reference | Manually commit each hunk: `but diff --json` to get hunk IDs, then `but commit <branch> -m "msg" --changes <hunk-id>` for each |
+| Plugin auto-cleanup misses empty branches | `ge-branch-*` cleanup has ~12% failure rate; user-named empty branches are never auto-cleaned | Run `/b-branch-gc` command or manually `but unapply <branch-id>` |
+| Notifications not reaching agent | Plugin notification delivery is ~55% (259 queued vs 142 delivered in observed sessions) | Always verify state with `but status --json` — don't rely on `<system-reminder>` notifications alone |
+
+### Diagnosing `zz` Stuck Files
+
+When files are stuck in `zz` (unassigned) and don't auto-recover:
+
+1. **Identify the cause:**
+   ```bash
+   but status --json -f    # Look for files in zz with [LOCKED] markers
+   but diff --json          # Get hunk-level IDs and see lock targets
+   ```
+
+2. **If hunks are locked to different branches** (split-hunk scenario):
+   - Each hunk must be committed to its locked branch individually
+   - `but commit <branch> -m "msg" --changes <hunk-id>` for each hunk
+   - Or `but rub <hunk-id> <commit-id>` to amend into the locked commit
+
+3. **If files have no locks but are still in `zz`:**
+   - Plugin's `after-edit` may have failed silently — stage manually
+   - `but stage <file-id> <branch>` or commit with `--changes`
+
+4. **If many files are stuck after `but cursor stop`:**
+   - Run `but rub <file-id> <branch-id>` for each file to force assignment
+   - This is the most reliable recovery method
+
+**Key insight:** Auto-recovery won't fix multi-branch locked files. If you see `[LOCKED]` in `zz`, manual intervention is required.
 
 ## Critical Safety Rules
 
@@ -273,3 +304,27 @@ but absorb                                         # Absorb any auto-formatted c
 6. Use `--dry-run` flags (push, absorb) when unsure
 7. **Run `but pull` frequently** — at session start, before creating branches, and before pushing. Stale workspace = merge conflicts
 8. When updating this skill, use `but skill install --path <known-path>` to avoid prompts
+9. **Check for `zz` files with locks before finishing work.** Run `but status --json -f` and look for files in `zz` with `[LOCKED]` markers. These won't auto-recover — you must manually commit each hunk to its correct branch using `--changes <hunk-id>`. See [references/concepts.md — Hunk Locking](references/concepts.md) for details.
+10. **Don't trust notifications alone** — plugin notification delivery is ~55%. Always verify workspace state with `but status --json` before making assumptions about branch assignments or commit status.
+
+## Plugin Auto-Behaviors (What Happens Behind the Scenes)
+
+The GitButler plugin performs several actions automatically. **You do NOT need to do these yourself** — but you should know they happen so you don't duplicate work or get confused by unexpected state changes.
+
+| Behavior | Trigger | What It Does |
+|----------|---------|--------------|
+| **File auto-assign** | After each file edit | Finds which branch owns the file and runs `but cursor after-edit` or `but rub` to assign it |
+| **Auto-commit** | Session idle (agent stops editing) | Runs `but cursor stop` which commits all uncommitted changes to their assigned branches |
+| **LLM commit reword** | After auto-commit | Rewrites generic commit messages using Claude Haiku based on the actual diff |
+| **Branch rename** | After auto-commit | Renames `ge-branch-*` branches to descriptive names based on user's prompt |
+| **Empty branch cleanup** | After auto-commit | Removes `ge-branch-*` branches with 0 commits (~88% success rate) |
+| **Session title sync** | After auto-commit | Updates session title from branch name |
+| **Context injection** | Before each agent message | Injects `<system-reminder>` with workspace notifications (branch created, commits made, etc.) |
+
+### What This Means for You
+
+1. **Don't manually rename `ge-branch-*` branches** — the plugin will do it after idle
+2. **Don't reword auto-generated commit messages** — the plugin rewrites them with LLM
+3. **If you see unexpected commits** — check if the plugin auto-committed during an idle event
+4. **Notification delivery is ~55%** — not all injected notifications reach you. Always verify state with `but status --json` rather than relying on notifications
+5. **Empty branch cleanup can fail** — if you see stale `ge-branch-*` branches, run `/b-branch-gc`

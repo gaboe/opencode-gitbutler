@@ -177,6 +177,40 @@ Prevents you from creating broken states:
 - Can't stage changes to wrong branches
 - Ensures each branch remains independently functional
 
+## Hunk Locking & Split Files
+
+When a file has changes touching lines that belong to commits on **different branches**, GitButler "locks" those hunks.
+
+### How Locking Works
+
+```
+File: src/api.ts
+  Line 10-15: depends on commit C1 (branch: feat/auth)
+  Line 40-50: depends on commit C3 (branch: fix/validation)
+  Line 80-90: new code, no dependency
+```
+
+- Lines 10-15 are **locked to** `feat/auth` — shown as `[LOCKED → C1]`
+- Lines 40-50 are **locked to** `fix/validation` — shown as `[LOCKED → C3]`
+- Lines 80-90 are **free** — can be staged/committed to any branch
+
+### Split Hunk Assignment (`zz` Trap)
+
+When a file's hunks are locked to **multiple different branches**, GitButler cannot auto-assign the file to any single branch. The file stays in `zz` (unassigned) with lock markers.
+
+**This is the most common cause of files "stuck in `zz`"** — the plugin's `after-edit` hook sees the file is mentioned on a branch (via lock) and considers it "handled", but the file remains unassigned.
+
+**Resolution:**
+
+1. Run `but status --json -f` to identify locked files in `zz`
+2. Use `but diff --json` to see individual hunk IDs and their lock targets
+3. Commit or amend each hunk individually: `but commit <branch> -m "msg" --changes <hunk-id>`
+4. Or use `but rub <hunk-id> <commit-id>` to amend specific hunks into their locked commits
+
+### Key Takeaway
+
+If files are stuck in `zz` with `[LOCKED]` markers, **don't wait for auto-recovery** — it won't happen for multi-branch locks. Manually assign each hunk to its correct branch.
+
 ## Empty Commits as Placeholders
 
 You can create empty commits:

@@ -201,6 +201,7 @@ but pull                        # Then pull merged changes
 | `M` | Modified |
 | `D` | Deleted |
 | `[LOCKED]` | File depends on specific commit (absorb target) |
+| `zz` | Unassigned — file not staged to any branch |
 | `●` | Commit |
 | `CONFLICTED` | Needs conflict resolution |
 
@@ -269,3 +270,16 @@ but pr new feat/my-feature -t
 but unapply feat/my-feature
 but pull
 ```
+
+---
+
+## Troubleshooting Quick Reference
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Files stuck in `zz` with `[LOCKED]` | Hunks locked to commits on different branches | `but diff --json` → commit each hunk individually with `--changes <hunk-id>` |
+| Files in `zz` after edits (no locks) | Plugin `after-edit` didn't auto-assign | `but stage <file-id> <branch>` or `but commit <branch> -m "msg" --changes <id>` |
+| Many empty `ge-branch-*` branches | Plugin auto-cleanup failed (~12% failure rate) | Run `/b-branch-gc` or `but unapply <branch-id>` for each |
+| `but absorb` puts hunk on wrong commit | Hunk locked to commit on different branch | Use `but amend <file-id> <commit-id>` for explicit control |
+| `but pull` fails after PR merge | Merged branch still applied in workspace | `but unapply <merged-branch>` first, then `but pull` |
+| Changes "disappear" after `but cursor stop` | Plugin auto-committed to a `ge-branch-*` | `but status --json -f` — check all branches for your files |

@@ -6,6 +6,14 @@ description: Clean up empty or orphaned GitButler branches
 
 Identify and remove empty or orphaned `ge-branch-*` branches that have accumulated from past sessions.
 
+## When to Run
+
+- **After multi-session work** — each agent session may create `ge-branch-*` branches that become empty after commits are moved or squashed
+- **When `but status` shows 3+ `ge-branch-*` branches** — workspace clutter slows down branch selection and increases lock contention
+- **After `but cursor stop` failures** — the plugin's auto-cleanup has ~12% failure rate; empty branches may persist
+- **When user reports "too many branches"** — proactively offer to run this command
+- **User-named branches are NEVER auto-cleaned** — only `ge-branch-*` pattern branches are candidates
+
 ## Additional Instructions
 
 $ARGUMENTS
