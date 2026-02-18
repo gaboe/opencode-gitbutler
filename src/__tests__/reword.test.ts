@@ -5,7 +5,11 @@ import {
   toBranchSlug,
   classifyRewordFailure,
   COMMIT_PREFIX_PATTERNS,
+  createRewordManager,
 } from "../reword.js";
+import type { Cli, FileBranchResult } from "../cli.js";
+import type { Logger } from "../logger.js";
+import { DEFAULT_CONFIG } from "../config.js";
 
 describe("detectCommitPrefix", () => {
   test("detects fix-related words", () => {
@@ -166,5 +170,174 @@ describe("classifyRewordFailure", () => {
 
   test("first matching pattern wins", () => {
     expect(classifyRewordFailure("locked and not found")).toBe("locked");
+  });
+});
+
+describe("postStopProcessing inference metrics", () => {
+  function makeLogger(entries: Array<{ cat: string; data?: Record<string, unknown> }>): Logger {
+    return {
+      info: (cat, data) => entries.push({ cat, data }),
+      warn: (cat, data) => entries.push({ cat, data }),
+      error: (cat, data) => entries.push({ cat, data }),
+    };
+  }
+
+  function makeCli(
+    findFileBranch: (filePath: string) => FileBranchResult,
+    statusOverride?: ReturnType<Cli["getFullStatus"]>,
+  ): Cli {
+    return {
+      isWorkspaceMode: () => true,
+      findFileBranch: (filePath) => findFileBranch(filePath),
+      butRub: () => false,
+      butUnapply: () => ({ ok: true, stderr: "" }),
+      butUnapplyWithRetry: async () => true,
+      getFullStatus: () =>
+        statusOverride ?? {
+          stacks: [],
+          unassignedChanges: [],
+        },
+      butReword: () => ({ ok: true, stderr: "" }),
+      butCursor: async () => {},
+      extractFilePath: () => undefined,
+      extractEdits: () => [],
+      hasMultiBranchHunks: () => false,
+      toRelativePath: (absPath) => absPath,
+    };
+  }
+
+  test("logs sweep summary even when no files are rubbed", async () => {
+    const entries: Array<{ cat: string; data?: Record<string, unknown> }> = [];
+    const manager = createRewordManager({
+      cwd: "/tmp",
+      log: makeLogger(entries),
+      cli: makeCli(() => ({ inBranch: true, confidence: "ambiguous" })),
+      config: DEFAULT_CONFIG,
+      defaultBranchPattern: new RegExp(DEFAULT_CONFIG.default_branch_pattern),
+      addNotification: () => {},
+      resolveSessionRoot: (sessionID) => sessionID ?? "root",
+      conversationsWithEdits: new Set(["conv-1"]),
+      rewordedBranches: new Set(),
+      branchOwnership: new Map(),
+      editedFilesPerConversation: new Map([
+        ["conv-1", new Set(["src/example.ts"] as const)],
+      ]),
+      savePluginState: async () => {},
+      internalSessionIds: new Set(),
+      reapStaleLocks: () => {},
+      client: {
+        session: {
+          messages: async () => ({ data: [] }),
+          create: async () => ({ data: { id: "tmp" } }),
+          prompt: async () => ({ data: { parts: [] } }),
+          delete: async () => ({}),
+          update: async () => ({}),
+        },
+      },
+    });
+
+    await manager.postStopProcessing("session-1", "conv-1", false);
+
+    const summary = entries.find((entry) => entry.cat === "post-stop-sweep-summary");
+    expect(summary?.data).toMatchObject({
+      conversationId: "conv-1",
+      filesChecked: 1,
+      rubbed: 0,
+      skippedAmbiguous: 1,
+    });
+  });
+
+  test("logs candidate confidence and ambiguous skips", async () => {
+    const entries: Array<{ cat: string; data?: Record<string, unknown> }> = [];
+    const status = {
+      stacks: [
+        {
+          assignedChanges: [],
+          branches: [
+            {
+              cliId: "br-1",
+              name: "feature/test",
+              branchStatus: "pushed",
+              commits: [
+                {
+                  cliId: "c1",
+                  commitId: "abc123",
+                  message: "feat: test",
+                  changes: [{ filePath: "src/a.ts" }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      unassignedChanges: [],
+    };
+
+    const manager = createRewordManager({
+      cwd: "/tmp",
+      log: makeLogger(entries),
+      cli: makeCli((filePath) => {
+        if (filePath === "src/a.ts") {
+          return {
+            inBranch: true,
+            branchCliId: "br-1",
+            branchName: "feature/test",
+            confidence: "high",
+          };
+        }
+        return {
+          inBranch: true,
+          confidence: "ambiguous",
+        };
+      }, status),
+      config: DEFAULT_CONFIG,
+      defaultBranchPattern: new RegExp(DEFAULT_CONFIG.default_branch_pattern),
+      addNotification: () => {},
+      resolveSessionRoot: (sessionID) => sessionID ?? "root",
+      conversationsWithEdits: new Set(["conv-2"]),
+      rewordedBranches: new Set(),
+      branchOwnership: new Map(),
+      editedFilesPerConversation: new Map([
+        ["conv-2", new Set(["src/a.ts", "src/b.ts"] as const)],
+      ]),
+      savePluginState: async () => {},
+      internalSessionIds: new Set(),
+      reapStaleLocks: () => {},
+      client: {
+        session: {
+          messages: async () => ({
+            data: [
+              {
+                info: { role: "user" },
+                parts: [{ type: "text", text: "fix assignment" }],
+              },
+            ],
+          }),
+          create: async () => ({ data: { id: "tmp" } }),
+          prompt: async () => ({ data: { parts: [] } }),
+          delete: async () => ({}),
+          update: async () => ({}),
+        },
+      },
+    });
+
+    await manager.postStopProcessing("session-2", "conv-2", false);
+
+    const candidateLog = entries.find(
+      (entry) => entry.cat === "post-stop-candidate-confidence",
+    );
+    expect(candidateLog?.data).toMatchObject({
+      conversationId: "conv-2",
+      skippedAmbiguous: 1,
+    });
+
+    const candidateRows = (candidateLog?.data?.candidates as Array<Record<string, unknown>>) ?? [];
+    expect(candidateRows).toContainEqual(
+      expect.objectContaining({
+        branchCliId: "br-1",
+        confidence: "high",
+        fileCount: 1,
+      }),
+    );
   });
 });

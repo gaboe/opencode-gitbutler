@@ -135,3 +135,36 @@ describe("hasMultiBranchHunks logic", () => {
     expect(hasMultiBranchHunksFromStatus("target.ts", stacks)).toBe(false);
   });
 });
+
+describe("after-edit routing guard", () => {
+  function shouldAutoRub(branchInfo: {
+    inBranch: boolean;
+    unassignedCliId?: string;
+    branchCliId?: string;
+  }): boolean {
+    return Boolean(
+      branchInfo.inBranch &&
+        branchInfo.unassignedCliId &&
+        branchInfo.branchCliId,
+    );
+  }
+
+  test("does not auto-rub when branch attribution is ambiguous", () => {
+    expect(
+      shouldAutoRub({
+        inBranch: true,
+        unassignedCliId: "u1",
+      }),
+    ).toBe(false);
+  });
+
+  test("auto-rubs only when both source and destination are known", () => {
+    expect(
+      shouldAutoRub({
+        inBranch: true,
+        unassignedCliId: "u1",
+        branchCliId: "br1",
+      }),
+    ).toBe(true);
+  });
+});

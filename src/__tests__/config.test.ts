@@ -93,6 +93,7 @@ describe("loadConfig", () => {
     expect(config.auto_update).toBe(DEFAULT_CONFIG.auto_update);
     expect(config.max_diff_chars).toBe(DEFAULT_CONFIG.max_diff_chars);
     expect(config.branch_slug_max_length).toBe(DEFAULT_CONFIG.branch_slug_max_length);
+    expect(config.inference_enabled).toBe(DEFAULT_CONFIG.inference_enabled);
   });
 
   test("parses JSONC config with comments and trailing commas", async () => {
@@ -150,5 +151,17 @@ describe("loadConfig", () => {
     const config2 = await loadConfig(tempDir);
     expect(config1).toEqual(config2);
     expect(config1).not.toBe(config2);
+  });
+
+  test("loads inference_enabled when explicitly set", async () => {
+    const configDir = join(tempDir, ".opencode");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(
+      join(configDir, "gitbutler.json"),
+      JSON.stringify({ inference_enabled: false })
+    );
+
+    const config = await loadConfig(tempDir);
+    expect(config.inference_enabled).toBe(false);
   });
 });

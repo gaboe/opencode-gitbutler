@@ -27,7 +27,13 @@ export type FileBranchResult = {
   branchCliId?: string;
   branchName?: string;
   unassignedCliId?: string;
+  confidence?: BranchInferenceConfidence;
 };
+
+export type BranchInferenceConfidence =
+  | "high"
+  | "medium"
+  | "ambiguous";
 
 export type ButStatusBranch = {
   cliId: string;
@@ -82,13 +88,158 @@ export type Cli = {
   toRelativePath: (absPath: string) => string;
 };
 
+export type CliOptions = {
+  inferenceEnabled?: boolean;
+};
+
 const CURSOR_RETRY_PARAMS: Record<string, { maxRetries: number; baseMs: number }> = {
   stop: { maxRetries: 5, baseMs: 500 },
   default: { maxRetries: 3, baseMs: 200 },
 };
 
-export function createCli(cwd: string, log: Logger): Cli {
+export function createCli(
+  cwd: string,
+  log: Logger,
+  options: CliOptions = {},
+): Cli {
   const resolvedCwd = resolve(cwd);
+  const inferenceEnabled = options.inferenceEnabled ?? true;
+
+  function toPathSegments(filePath: string): string[] {
+    return filePath
+      .replace(/\\/g, "/")
+      .split("/")
+      .filter(Boolean);
+  }
+
+  function sharedPrefixDepth(a: string[], b: string[]): number {
+    const limit = Math.min(a.length, b.length);
+    let depth = 0;
+    while (depth < limit && a[depth] === b[depth]) {
+      depth++;
+    }
+    return depth;
+  }
+
+  function scoreBranchByDirectoryPrefix(
+    filePath: string,
+    branch: ButStatusBranch,
+  ): number {
+    const targetSegments = toPathSegments(filePath);
+    let maxScore = 0;
+    for (const commit of branch.commits ?? []) {
+      for (const change of commit.changes ?? []) {
+        if (!change.filePath) continue;
+        const candidateSegments = toPathSegments(change.filePath);
+        const score = sharedPrefixDepth(
+          targetSegments,
+          candidateSegments,
+        );
+        if (score > maxScore) {
+          maxScore = score;
+        }
+      }
+    }
+    return maxScore;
+  }
+
+  function inferAssignedBranch(
+    filePath: string,
+    stackBranches: ButStatusBranch[],
+    unassignedCliId?: string,
+  ): FileBranchResult {
+    if (!inferenceEnabled) {
+      log.info("inference-disabled", {
+        file: filePath,
+        branchCount: stackBranches.length,
+      });
+      return {
+        inBranch: true,
+        unassignedCliId,
+        confidence: "ambiguous",
+      };
+    }
+
+    if (stackBranches.length === 0) {
+      log.warn("inference-no-branches", {
+        file: filePath,
+      });
+      return {
+        inBranch: true,
+        unassignedCliId,
+        confidence: "ambiguous",
+      };
+    }
+
+    if (stackBranches.length === 1) {
+      const [branch] = stackBranches;
+      if (!branch) {
+        return {
+          inBranch: true,
+          unassignedCliId,
+          confidence: "ambiguous",
+        };
+      }
+      log.info("inference-single-branch", {
+        file: filePath,
+        branchCliId: branch.cliId,
+        branchName: branch.name,
+      });
+      return {
+        inBranch: true,
+        branchCliId: branch.cliId,
+        branchName: branch.name,
+        unassignedCliId,
+        confidence: "high",
+      };
+    }
+
+    const scoredBranches = stackBranches
+      .map((branch) => ({
+        branch,
+        score: scoreBranchByDirectoryPrefix(filePath, branch),
+      }))
+      .sort((a, b) => b.score - a.score);
+
+    const best = scoredBranches[0];
+    const second = scoredBranches[1];
+    if (
+      best?.branch &&
+      second &&
+      best.score >= 2 &&
+      best.score > second.score
+    ) {
+      log.info("inference-directory-match", {
+        file: filePath,
+        branchCliId: best.branch.cliId,
+        branchName: best.branch.name,
+        score: best.score,
+        margin: best.score - second.score,
+        branchCount: stackBranches.length,
+      });
+      return {
+        inBranch: true,
+        branchCliId: best.branch.cliId,
+        branchName: best.branch.name,
+        unassignedCliId,
+        confidence: "medium",
+      };
+    }
+
+    log.warn("inference-ambiguous", {
+      file: filePath,
+      branchCount: stackBranches.length,
+      scores: scoredBranches.map((entry) => ({
+        branchCliId: entry.branch.cliId,
+        score: entry.score,
+      })),
+    });
+    return {
+      inBranch: true,
+      unassignedCliId,
+      confidence: "ambiguous",
+    };
+  }
 
   function toRelativePath(absPath: string): string {
     const resolved = resolve(absPath);
@@ -136,13 +287,17 @@ export function createCli(cwd: string, log: Logger): Cli {
         (ch) => ch.filePath === normalized,
       );
 
+      const assignedStacks: NonNullable<
+        ButStatusFull["stacks"]
+      > = [];
+
       for (const stack of data.stacks ?? []) {
         if (
           stack.assignedChanges?.some(
             (ch) => ch.filePath === normalized,
           )
         ) {
-          return { inBranch: true };
+          assignedStacks.push(stack);
         }
 
         for (const branch of stack.branches ?? []) {
@@ -157,10 +312,44 @@ export function createCli(cwd: string, log: Logger): Cli {
                 branchCliId: branch.cliId,
                 branchName: branch.name,
                 unassignedCliId: unassigned?.cliId,
+                confidence: "high",
               };
             }
           }
         }
+      }
+
+      if (assignedStacks.length === 1) {
+        const [stack] = assignedStacks;
+        if (stack) {
+          return inferAssignedBranch(
+            normalized,
+            stack.branches ?? [],
+            unassigned?.cliId,
+          );
+        }
+      }
+
+      if (assignedStacks.length > 1) {
+        const uniqueBranches = new Set<string>();
+        for (const stack of assignedStacks) {
+          for (const branch of stack.branches ?? []) {
+            if (branch.cliId) {
+              uniqueBranches.add(branch.cliId);
+            }
+          }
+        }
+        log.warn("inference-ambiguous", {
+          file: normalized,
+          reason: "multiple-assigned-stacks",
+          stackCount: assignedStacks.length,
+          branchCount: uniqueBranches.size,
+        });
+        return {
+          inBranch: true,
+          unassignedCliId: unassigned?.cliId,
+          confidence: "ambiguous",
+        };
       }
 
       return { inBranch: false };

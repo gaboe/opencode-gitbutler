@@ -350,14 +350,18 @@ export function createRewordManager(deps: RewordDeps): RewordManager {
 
     reapStaleLocks();
 
+    const statusForSweep = cli.getFullStatus();
     const editedFiles = editedFilesPerConversation.get(conversationId);
     let sweepRubCount = 0;
+    let sweepSkippedAmbiguous = 0;
+    let sweepSkippedMultiBranch = 0;
+    let sweepNoTarget = 0;
     if (editedFiles && editedFiles.size > 0) {
       for (const filePath of editedFiles) {
         try {
-          const branchInfo = cli.findFileBranch(filePath);
+          const branchInfo = cli.findFileBranch(filePath, statusForSweep);
           if (branchInfo.unassignedCliId && branchInfo.branchCliId) {
-            if (!cli.hasMultiBranchHunks(filePath)) {
+            if (!cli.hasMultiBranchHunks(filePath, statusForSweep)) {
               const rubOk = cli.butRub(branchInfo.unassignedCliId, branchInfo.branchCliId);
               if (rubOk) {
                 sweepRubCount++;
@@ -365,27 +369,49 @@ export function createRewordManager(deps: RewordDeps): RewordManager {
                   file: filePath,
                   source: branchInfo.unassignedCliId,
                   dest: branchInfo.branchCliId,
+                  confidence: branchInfo.confidence,
                 });
               }
+            } else {
+              sweepSkippedMultiBranch++;
+              log.warn("post-stop-sweep-skip-multi-branch", {
+                file: filePath,
+                source: branchInfo.unassignedCliId,
+                dest: branchInfo.branchCliId,
+                confidence: branchInfo.confidence,
+              });
             }
+          } else if (branchInfo.inBranch && !branchInfo.branchCliId) {
+            sweepSkippedAmbiguous++;
+            log.warn("post-stop-sweep-skip-ambiguous", {
+              file: filePath,
+              confidence: branchInfo.confidence,
+            });
+          } else {
+            sweepNoTarget++;
+            log.info("post-stop-sweep-no-target", {
+              file: filePath,
+              inBranch: branchInfo.inBranch,
+            });
           }
         } catch {
           // best-effort per file
         }
       }
-      if (sweepRubCount > 0) {
-        log.info("post-stop-sweep-summary", {
-          conversationId,
-          filesChecked: editedFiles.size,
-          rubbed: sweepRubCount,
-        });
-      }
+      log.info("post-stop-sweep-summary", {
+        conversationId,
+        filesChecked: editedFiles.size,
+        rubbed: sweepRubCount,
+        skippedAmbiguous: sweepSkippedAmbiguous,
+        skippedMultiBranch: sweepSkippedMultiBranch,
+        noTarget: sweepNoTarget,
+      });
     }
 
     const prompt = await fetchUserPrompt(rootSessionID);
     if (!prompt) return;
 
-    const status = cli.getFullStatus();
+    const status = statusForSweep ?? cli.getFullStatus();
     if (!status?.stacks) return;
 
     const ownershipSnapshot: Array<{
@@ -428,12 +454,68 @@ export function createRewordManager(deps: RewordDeps): RewordManager {
     }
 
     const candidateBranchCliIds = new Set<string>();
+    const candidateConfidenceByBranch = new Map<
+      string,
+      { confidence: string; fileCount: number; branchName: string }
+    >();
+    let candidateAmbiguousCount = 0;
+    const confidenceRank: Record<string, number> = {
+      ambiguous: 0,
+      medium: 1,
+      high: 2,
+    };
     if (ownershipMatches && editedFiles && editedFiles.size > 0) {
       for (const filePath of editedFiles) {
         const branchInfo = cli.findFileBranch(filePath, status);
         if (branchInfo.branchCliId) {
           candidateBranchCliIds.add(branchInfo.branchCliId);
+          const nextConfidence =
+            branchInfo.confidence ?? "high";
+          const existingConfidence = candidateConfidenceByBranch.get(
+            branchInfo.branchCliId,
+          );
+          const mergedConfidence = existingConfidence
+            ? confidenceRank[nextConfidence] <
+              confidenceRank[
+                existingConfidence.confidence
+              ]
+              ? nextConfidence
+              : existingConfidence.confidence
+            : nextConfidence;
+          candidateConfidenceByBranch.set(branchInfo.branchCliId, {
+            confidence: mergedConfidence,
+            fileCount: (existingConfidence?.fileCount ?? 0) + 1,
+            branchName:
+              branchInfo.branchName ??
+              existingConfidence?.branchName ??
+              branchInfo.branchCliId,
+          });
+        } else if (branchInfo.inBranch) {
+          candidateAmbiguousCount++;
+          log.warn("post-stop-candidate-skip-ambiguous", {
+            conversationId,
+            file: filePath,
+            confidence: branchInfo.confidence,
+          });
         }
+      }
+
+      if (
+        candidateConfidenceByBranch.size > 0 ||
+        candidateAmbiguousCount > 0
+      ) {
+        log.info("post-stop-candidate-confidence", {
+          conversationId,
+          candidates: [...candidateConfidenceByBranch.entries()].map(
+            ([branchCliId, info]) => ({
+              branchCliId,
+              branchName: info.branchName,
+              confidence: info.confidence,
+              fileCount: info.fileCount,
+            }),
+          ),
+          skippedAmbiguous: candidateAmbiguousCount,
+        });
       }
     }
 

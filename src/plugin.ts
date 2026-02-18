@@ -33,7 +33,9 @@ export function createGitButlerPlugin(
   return async ({ client, directory, worktree }) => {
   const cwd = worktree ?? directory;
   const log = createLogger(config.log_enabled, cwd);
-  const cli = createCli(cwd, log);
+  const cli = createCli(cwd, log, {
+    inferenceEnabled: config.inference_enabled,
+  });
   const state = createStateManager(cwd, log);
 
   // Hydrate session map from disk
@@ -135,8 +137,8 @@ export function createGitButlerPlugin(
   });
 
   type AssignmentCacheEntry = {
-    branchCliId: string;
     conversationId: string;
+    rootSessionID: string;
     timestamp: number;
   };
   const assignmentCache = new Map<string, AssignmentCacheEntry>();
@@ -312,11 +314,25 @@ export function createGitButlerPlugin(
 
       const relativePath = cli.toRelativePath(filePath);
       try {
+        const rootSessionID = state.resolveSessionRoot(
+          input.sessionID,
+        );
         const cached = assignmentCache.get(relativePath);
-        const cacheHit = cached && Date.now() - cached.timestamp < ASSIGNMENT_CACHE_TTL_MS;
+        const cacheHit =
+          cached &&
+          Date.now() - cached.timestamp <
+            ASSIGNMENT_CACHE_TTL_MS &&
+          cached.rootSessionID === rootSessionID;
 
         if (!cacheHit) {
           const statusSnapshot = cli.getFullStatus();
+          if (!statusSnapshot) {
+            log.warn("after-edit-skip-no-status", {
+              file: relativePath,
+              sessionID: input.sessionID,
+            });
+            return;
+          }
           const branchInfo = cli.findFileBranch(relativePath, statusSnapshot);
           if (branchInfo.inBranch) {
             if (
@@ -326,6 +342,7 @@ export function createGitButlerPlugin(
               if (cli.hasMultiBranchHunks(relativePath, statusSnapshot)) {
                 log.warn("rub-skip-multi-branch", {
                   file: relativePath,
+                  confidence: branchInfo.confidence,
                 });
               } else {
                 log.info("rub-check", {
@@ -333,6 +350,7 @@ export function createGitButlerPlugin(
                   multiBranch: false,
                   source: branchInfo.unassignedCliId,
                   dest: branchInfo.branchCliId,
+                  confidence: branchInfo.confidence,
                 });
                 const rubOk = cli.butRub(
                   branchInfo.unassignedCliId,
@@ -343,20 +361,30 @@ export function createGitButlerPlugin(
                     source: branchInfo.unassignedCliId,
                     dest: branchInfo.branchCliId,
                     file: relativePath,
+                    confidence: branchInfo.confidence,
                   });
                 } else {
                   log.error("rub-failed", {
                     source: branchInfo.unassignedCliId,
                     dest: branchInfo.branchCliId,
                     file: relativePath,
+                    confidence: branchInfo.confidence,
                   });
                 }
               }
+            } else if (!branchInfo.branchCliId) {
+              log.warn("after-edit-ambiguous-assignment", {
+                file: relativePath,
+                sessionID: input.sessionID,
+                confidence: branchInfo.confidence,
+              });
             } else {
               log.info("after-edit-already-assigned", {
                 file: relativePath,
                 sessionID: input.sessionID,
-                branch: branchInfo.branchName,
+                branch: branchInfo.branchName ?? branchInfo.branchCliId,
+                branchCliId: branchInfo.branchCliId,
+                confidence: branchInfo.confidence ?? "high",
               });
             }
             return;
@@ -364,12 +392,13 @@ export function createGitButlerPlugin(
         } else {
           log.info("assignment-cache-hit", {
             file: relativePath,
-            branchCliId: cached.branchCliId,
+            conversationId: cached.conversationId,
+            rootSessionID: cached.rootSessionID,
             ageMs: Date.now() - cached.timestamp,
           });
         }
 
-        const branchSeed = config.branch_target ?? state.resolveSessionRoot(input.sessionID);
+        const branchSeed = config.branch_target ?? rootSessionID;
         const conversationId = cacheHit
           ? cached.conversationId
           : await toUUID(branchSeed);
@@ -391,8 +420,8 @@ export function createGitButlerPlugin(
           });
 
           assignmentCache.set(relativePath, {
-            branchCliId: conversationId,
             conversationId,
+            rootSessionID,
             timestamp: Date.now(),
           });
         } catch (err) {
@@ -409,7 +438,6 @@ export function createGitButlerPlugin(
         }
         editedFilesPerConversation.get(conversationId)!.add(relativePath);
 
-        const rootSessionID = state.resolveSessionRoot(input.sessionID);
         const existingOwner = branchOwnership.get(conversationId);
         if (existingOwner && existingOwner.rootSessionID !== rootSessionID) {
           log.error("branch-collision", {

@@ -27,6 +27,7 @@ export type GitButlerPluginConfig = {
   notification_max_age_ms: number;
   /** When set, all sessions use this value for conversation_id instead of rootSessionID */
   branch_target?: string;
+  inference_enabled: boolean;
 };
 
 export const DEFAULT_CONFIG: Readonly<GitButlerPluginConfig> = {
@@ -42,6 +43,7 @@ export const DEFAULT_CONFIG: Readonly<GitButlerPluginConfig> = {
   edit_debounce_ms: 200,
   gc_on_session_start: false,
   notification_max_age_ms: 300_000,
+  inference_enabled: true,
 };
 
 const CONFIG_FILE_NAME = ".opencode/gitbutler.json";
@@ -159,6 +161,9 @@ export async function loadConfig(
       notification_max_age_ms: typeof parsed.notification_max_age_ms === "number" && parsed.notification_max_age_ms >= 0
         ? parsed.notification_max_age_ms
         : DEFAULT_CONFIG.notification_max_age_ms,
+      inference_enabled: typeof parsed.inference_enabled === "boolean"
+        ? parsed.inference_enabled
+        : DEFAULT_CONFIG.inference_enabled,
       ...(typeof parsed.branch_target === "string" && parsed.branch_target.length > 0
         ? { branch_target: parsed.branch_target }
         : {}),
