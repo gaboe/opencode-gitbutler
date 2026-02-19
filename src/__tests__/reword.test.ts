@@ -4,6 +4,7 @@ import {
   toCommitMessage,
   toBranchSlug,
   classifyRewordFailure,
+  rewordTrackingKey,
   COMMIT_PREFIX_PATTERNS,
   createRewordManager,
 } from "../reword.js";
@@ -173,6 +174,18 @@ describe("classifyRewordFailure", () => {
   });
 });
 
+describe("rewordTrackingKey", () => {
+  test("creates unique keys per branch+commit", () => {
+    const a = rewordTrackingKey("br-1", "sha-1");
+    const b = rewordTrackingKey("br-1", "sha-2");
+    const c = rewordTrackingKey("br-2", "sha-1");
+
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(c);
+    expect(a).toContain("\0");
+  });
+});
+
 describe("postStopProcessing inference metrics", () => {
   function makeLogger(entries: Array<{ cat: string; data?: Record<string, unknown> }>): Logger {
     return {
@@ -338,6 +351,196 @@ describe("postStopProcessing inference metrics", () => {
         confidence: "high",
         fileCount: 1,
       }),
+    );
+  });
+
+  test("updates branch ownership to resolved branch name", async () => {
+    const entries: Array<{ cat: string; data?: Record<string, unknown> }> = [];
+    const conversationId = "conv-owner";
+    const branchOwnership = new Map([
+      [
+        conversationId,
+        {
+          rootSessionID: "session-owner",
+          branchName: "conversation-12345678",
+          firstSeen: 1,
+        },
+      ],
+    ]);
+
+    const status = {
+      stacks: [
+        {
+          assignedChanges: [{ filePath: "src/a.ts" }],
+          branches: [
+            {
+              cliId: "br-owner",
+              name: "feature/owner",
+              branchStatus: "completelyUnpushed",
+              commits: [
+                {
+                  cliId: "c-owner",
+                  commitId: "sha-owner",
+                  message: "session changes",
+                  changes: [{ filePath: "src/a.ts" }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      unassignedChanges: [],
+    };
+
+    const manager = createRewordManager({
+      cwd: "/tmp",
+      log: makeLogger(entries),
+      cli: {
+        ...makeCli(() => ({
+          inBranch: true,
+          branchCliId: "br-owner",
+          branchName: "feature/owner",
+          confidence: "high",
+        }), status),
+        butReword: () => ({ ok: true, stderr: "" }),
+      },
+      config: DEFAULT_CONFIG,
+      defaultBranchPattern: new RegExp(DEFAULT_CONFIG.default_branch_pattern),
+      addNotification: () => {},
+      resolveSessionRoot: (sessionID) => sessionID ?? "root",
+      conversationsWithEdits: new Set([conversationId]),
+      rewordedBranches: new Set(),
+      branchOwnership,
+      editedFilesPerConversation: new Map([
+        [conversationId, new Set(["src/a.ts"] as const)],
+      ]),
+      savePluginState: async () => {},
+      internalSessionIds: new Set(),
+      reapStaleLocks: () => {},
+      client: {
+        session: {
+          messages: async () => ({
+            data: [
+              {
+                info: { role: "user" },
+                parts: [{ type: "text", text: "fix owner mapping" }],
+              },
+            ],
+          }),
+          create: async () => ({ data: { id: "tmp" } }),
+          prompt: async () => ({ data: { parts: [] } }),
+          delete: async () => ({}),
+          update: async () => ({}),
+        },
+      },
+    });
+
+    await manager.postStopProcessing("session-owner", conversationId, false);
+
+    expect(branchOwnership.get(conversationId)).toMatchObject({
+      rootSessionID: "session-owner",
+      branchName: "feature/owner",
+      firstSeen: 1,
+    });
+  });
+
+  test("rewords new commits on same branch across idle cycles", async () => {
+    const entries: Array<{ cat: string; data?: Record<string, unknown> }> = [];
+    const conversationId = "conv-repeat";
+    const rewordedBranches = new Set<string>();
+    const commitTargets: string[] = [];
+
+    const status = {
+      stacks: [
+        {
+          assignedChanges: [{ filePath: "src/a.ts" }],
+          branches: [
+            {
+              cliId: "br-repeat",
+              name: "feature/repeat",
+              branchStatus: "completelyUnpushed",
+              commits: [
+                {
+                  cliId: "c-1",
+                  commitId: "sha-1",
+                  message: "session changes",
+                  changes: [{ filePath: "src/a.ts" }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      unassignedChanges: [],
+    };
+
+    const manager = createRewordManager({
+      cwd: "/tmp",
+      log: makeLogger(entries),
+      cli: {
+        ...makeCli(() => ({
+          inBranch: true,
+          branchCliId: "br-repeat",
+          branchName: "feature/repeat",
+          confidence: "high",
+        }), status),
+        butReword: (target) => {
+          if (target.startsWith("c-")) {
+            commitTargets.push(target);
+          }
+          return { ok: true, stderr: "" };
+        },
+      },
+      config: DEFAULT_CONFIG,
+      defaultBranchPattern: new RegExp(DEFAULT_CONFIG.default_branch_pattern),
+      addNotification: () => {},
+      resolveSessionRoot: (sessionID) => sessionID ?? "root",
+      conversationsWithEdits: new Set([conversationId]),
+      rewordedBranches,
+      branchOwnership: new Map(),
+      editedFilesPerConversation: new Map([
+        [conversationId, new Set(["src/a.ts"] as const)],
+      ]),
+      savePluginState: async () => {},
+      internalSessionIds: new Set(),
+      reapStaleLocks: () => {},
+      client: {
+        session: {
+          messages: async () => ({
+            data: [
+              {
+                info: { role: "user" },
+                parts: [{ type: "text", text: "fix repeat behavior" }],
+              },
+            ],
+          }),
+          create: async () => ({ data: { id: "tmp" } }),
+          prompt: async () => ({ data: { parts: [] } }),
+          delete: async () => ({}),
+          update: async () => ({}),
+        },
+      },
+    });
+
+    await manager.postStopProcessing("session-repeat", conversationId, false);
+
+    status.stacks[0]!.branches![0]!.commits = [
+      {
+        cliId: "c-2",
+        commitId: "sha-2",
+        message: "session changes",
+        changes: [{ filePath: "src/a.ts" }],
+      },
+    ];
+
+    await manager.postStopProcessing("session-repeat", conversationId, false);
+
+    expect(commitTargets).toEqual(["c-1", "c-2"]);
+    expect(rewordedBranches).toContain(
+      rewordTrackingKey("br-repeat", "sha-1"),
+    );
+    expect(rewordedBranches).toContain(
+      rewordTrackingKey("br-repeat", "sha-2"),
     );
   });
 });

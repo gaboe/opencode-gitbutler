@@ -72,9 +72,29 @@ export function createGitButlerPlugin(
   const rewordedBranches = new Set<string>(
     persistedState.rewordedBranches,
   );
+  const MAX_TRACKED_REWORD_KEYS = 2_000;
+  while (rewordedBranches.size > MAX_TRACKED_REWORD_KEYS) {
+    const oldest = rewordedBranches.values().next().value;
+    if (!oldest) break;
+    rewordedBranches.delete(oldest);
+  }
   for (const [convId, ownership] of Object.entries(persistedState.branchOwnership ?? {})) {
     branchOwnership.set(convId, ownership);
   }
+
+  async function persistPluginState(): Promise<void> {
+    while (rewordedBranches.size > MAX_TRACKED_REWORD_KEYS) {
+      const oldest = rewordedBranches.values().next().value;
+      if (!oldest) break;
+      rewordedBranches.delete(oldest);
+    }
+    await state.savePluginState(
+      conversationsWithEdits,
+      rewordedBranches,
+      branchOwnership,
+    );
+  }
+
   log.info("state-loaded", {
     conversations: conversationsWithEdits.size,
     reworded: rewordedBranches.size,
@@ -149,7 +169,9 @@ export function createGitButlerPlugin(
     rewordedBranches,
     branchOwnership,
     editedFilesPerConversation,
-    savePluginState: state.savePluginState,
+    savePluginState: async () => {
+      await persistPluginState();
+    },
     internalSessionIds,
     reapStaleLocks,
     client,
@@ -388,11 +410,7 @@ export function createGitButlerPlugin(
           });
         }
 
-        state.savePluginState(
-          conversationsWithEdits,
-          rewordedBranches,
-          branchOwnership,
-        ).catch(() => {});
+        persistPluginState().catch(() => {});
       } finally {
         const releasedLock = fileLocks.get(relativePath);
         fileLocks.delete(relativePath);
@@ -482,7 +500,22 @@ export function createGitButlerPlugin(
           });
         }
 
-        await reword.postStopProcessing(props?.sessionID, conversationId, stopFailed);
+        let postStopSucceeded = false;
+        try {
+          await reword.postStopProcessing(props?.sessionID, conversationId, stopFailed);
+          postStopSucceeded = true;
+        } catch (err) {
+          log.error("post-stop-error", {
+            conversationId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+
+        if (!stopFailed && postStopSucceeded) {
+          conversationsWithEdits.delete(conversationId);
+          editedFilesPerConversation.delete(conversationId);
+          persistPluginState().catch(() => {});
+        }
 
         assignmentCache.clear();
         cachedStatus = null;
@@ -573,7 +606,7 @@ export function createGitButlerPlugin(
         }
 
         if (rewordedBranches.size > 0) {
-          contextParts.push(`Reworded branches (commit messages updated): ${rewordedBranches.size} branches`);
+          contextParts.push(`Tracked reworded commits: ${rewordedBranches.size}`);
         }
 
         if (conversationsWithEdits.has(conversationId)) {

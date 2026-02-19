@@ -154,6 +154,13 @@ export function classifyRewordFailure(stderr: string): string {
   return "unknown";
 }
 
+export function rewordTrackingKey(
+  branchCliId: string,
+  commitId: string,
+): string {
+  return `${branchCliId}\0${commitId}`;
+}
+
 export function createRewordManager(deps: RewordDeps): RewordManager {
   const {
     cwd,
@@ -554,10 +561,14 @@ export function createRewordManager(deps: RewordDeps): RewordManager {
         if (branch.branchStatus !== "completelyUnpushed")
           continue;
         if (branch.commits.length === 0) continue;
-        if (rewordedBranches.has(branch.cliId)) continue;
-
         const commit = branch.commits[0];
         if (!commit) continue;
+
+        const trackingKey = rewordTrackingKey(
+          branch.cliId,
+          commit.commitId,
+        );
+        if (rewordedBranches.has(trackingKey)) continue;
 
         try {
           // Skip if GitButler's Rust-side LLM already reworded (avoids double API cost)
@@ -578,7 +589,7 @@ export function createRewordManager(deps: RewordDeps): RewordManager {
               commit: commit.cliId,
               existingMessage: existingMsg,
             });
-            rewordedBranches.add(branch.cliId);
+            rewordedBranches.add(trackingKey);
             rewordCount++;
           } else {
             const llmMessage = await generateLLMCommitMessage(
@@ -612,7 +623,7 @@ export function createRewordManager(deps: RewordDeps): RewordManager {
               failCount++;
               continue;
             }
-            rewordedBranches.add(branch.cliId);
+            rewordedBranches.add(trackingKey);
             savePluginState(
               conversationsWithEdits,
               rewordedBranches,
@@ -686,6 +697,34 @@ export function createRewordManager(deps: RewordDeps): RewordManager {
           name: b.name,
         })),
       });
+    }
+
+    if (candidateBranches.length === 1) {
+      const branch = candidateBranches[0]!;
+      const syncedBranchName = latestBranchName ?? branch.name;
+      const current = branchOwnership.get(conversationId);
+      const branchChanged =
+        !current ||
+        current.rootSessionID !== rootSessionID ||
+        current.branchName !== syncedBranchName;
+
+      if (branchChanged) {
+        branchOwnership.set(conversationId, {
+          rootSessionID,
+          branchName: syncedBranchName,
+          firstSeen: current?.firstSeen ?? Date.now(),
+        });
+        savePluginState(
+          conversationsWithEdits,
+          rewordedBranches,
+          branchOwnership,
+        ).catch(() => {});
+        log.info("branch-ownership-updated", {
+          conversationId,
+          rootSessionID,
+          branchName: syncedBranchName,
+        });
+      }
     }
 
     if (shouldSetTitle) {
