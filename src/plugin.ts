@@ -27,6 +27,25 @@ import type { HookInput, HookOutput as StateHookOutput, EventPayload, BranchOwne
 import { createNotificationManager } from "./notify.js";
 import { createRewordManager } from "./reword.js";
 
+export async function toUUID(input: string): Promise<string> {
+  const data = new TextEncoder().encode(input);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  const hex = [...new Uint8Array(hash)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    `4${hex.slice(12, 15)}`,
+    `8${hex.slice(15, 18)}`,
+    hex.slice(18, 30),
+  ].join("-");
+}
+
+export function sessionCacheKey(rootSessionID: string, filePath: string): string {
+  return `${rootSessionID}\0${filePath}`;
+}
+
 export function createGitButlerPlugin(
   config: GitButlerPluginConfig = { ...DEFAULT_CONFIG },
 ): Plugin {
@@ -141,6 +160,7 @@ export function createGitButlerPlugin(
     rootSessionID: string;
     timestamp: number;
   };
+  // Cache keyed by "sessionRoot\0filePath" to prevent cross-session pollution
   const assignmentCache = new Map<string, AssignmentCacheEntry>();
   const ASSIGNMENT_CACHE_TTL_MS = 30_000;
 
@@ -157,23 +177,7 @@ export function createGitButlerPlugin(
     return fresh;
   }
 
-  async function toUUID(input: string): Promise<string> {
-    const data = new TextEncoder().encode(input);
-    const hash = await crypto.subtle.digest(
-      "SHA-256",
-      data,
-    );
-    const hex = [...new Uint8Array(hash)]
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-    return [
-      hex.slice(0, 8),
-      hex.slice(8, 12),
-      `4${hex.slice(12, 15)}`,
-      `8${hex.slice(15, 18)}`,
-      hex.slice(18, 30),
-    ].join("-");
-  }
+
 
   type BeforeHookInput = {
     tool?: string;
@@ -314,98 +318,27 @@ export function createGitButlerPlugin(
 
       const relativePath = cli.toRelativePath(filePath);
       try {
-        const rootSessionID = state.resolveSessionRoot(
-          input.sessionID,
-        );
-        const cached = assignmentCache.get(relativePath);
-        const cacheHit =
-          cached &&
-          Date.now() - cached.timestamp <
-            ASSIGNMENT_CACHE_TTL_MS &&
-          cached.rootSessionID === rootSessionID;
-
-        if (!cacheHit) {
-          const statusSnapshot = cli.getFullStatus();
-          if (!statusSnapshot) {
-            log.warn("after-edit-skip-no-status", {
-              file: relativePath,
-              sessionID: input.sessionID,
-            });
-            return;
-          }
-          const branchInfo = cli.findFileBranch(relativePath, statusSnapshot);
-          if (branchInfo.inBranch) {
-            if (
-              branchInfo.unassignedCliId &&
-              branchInfo.branchCliId
-            ) {
-              if (cli.hasMultiBranchHunks(relativePath, statusSnapshot)) {
-                log.warn("rub-skip-multi-branch", {
-                  file: relativePath,
-                  confidence: branchInfo.confidence,
-                });
-              } else {
-                log.info("rub-check", {
-                  file: relativePath,
-                  multiBranch: false,
-                  source: branchInfo.unassignedCliId,
-                  dest: branchInfo.branchCliId,
-                  confidence: branchInfo.confidence,
-                });
-                const rubOk = cli.butRub(
-                  branchInfo.unassignedCliId,
-                  branchInfo.branchCliId,
-                );
-                if (rubOk) {
-                  log.info("rub-ok", {
-                    source: branchInfo.unassignedCliId,
-                    dest: branchInfo.branchCliId,
-                    file: relativePath,
-                    confidence: branchInfo.confidence,
-                  });
-                } else {
-                  log.error("rub-failed", {
-                    source: branchInfo.unassignedCliId,
-                    dest: branchInfo.branchCliId,
-                    file: relativePath,
-                    confidence: branchInfo.confidence,
-                  });
-                }
-              }
-            } else if (!branchInfo.branchCliId) {
-              log.warn("after-edit-ambiguous-assignment", {
-                file: relativePath,
-                sessionID: input.sessionID,
-                confidence: branchInfo.confidence,
-              });
-            } else {
-              log.info("after-edit-already-assigned", {
-                file: relativePath,
-                sessionID: input.sessionID,
-                branch: branchInfo.branchName ?? branchInfo.branchCliId,
-                branchCliId: branchInfo.branchCliId,
-                confidence: branchInfo.confidence ?? "high",
-              });
-            }
-            return;
-          }
-        } else {
-          log.info("assignment-cache-hit", {
-            file: relativePath,
-            conversationId: cached.conversationId,
-            rootSessionID: cached.rootSessionID,
-            ageMs: Date.now() - cached.timestamp,
-          });
-        }
-
+        const rootSessionID = state.resolveSessionRoot(input.sessionID);
         const branchSeed = config.branch_target ?? rootSessionID;
+        const cacheKey = sessionCacheKey(rootSessionID, relativePath);
+        const cached = assignmentCache.get(cacheKey);
+        const cacheHit = cached && Date.now() - cached.timestamp < ASSIGNMENT_CACHE_TTL_MS;
         const conversationId = cacheHit
           ? cached.conversationId
           : await toUUID(branchSeed);
 
+        if (cacheHit) {
+          log.info("assignment-cache-hit", {
+            file: relativePath,
+            conversationId,
+            ageMs: Date.now() - cached.timestamp,
+          });
+        }
+
         log.info("after-edit", {
           file: relativePath,
           sessionID: input.sessionID,
+          rootSessionID,
           conversationId,
         });
 
@@ -419,7 +352,7 @@ export function createGitButlerPlugin(
             workspace_roots: [cwd],
           });
 
-          assignmentCache.set(relativePath, {
+          assignmentCache.set(cacheKey, {
             conversationId,
             rootSessionID,
             timestamp: Date.now(),
@@ -427,6 +360,7 @@ export function createGitButlerPlugin(
         } catch (err) {
           log.error("cursor-after-edit-error", {
             file: relativePath,
+            conversationId,
             error: err instanceof Error ? err.message : String(err),
           });
         }
